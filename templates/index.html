@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tapo D225 Viewer</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Tapo D225 Doorbell</h1>
+    <div id="camera-status" class="status disconnected">
+      <span class="dot"></span>
+      <span id="status-text">Connecting...</span>
+    </div>
+  </header>
+
+  <nav>
+    <button class="tab active" data-tab="live">Live Feed</button>
+    <button class="tab" data-tab="recordings">Recordings</button>
+    <button class="tab" data-tab="settings">Settings</button>
+  </nav>
+
+  <main>
+    <!-- Live Feed Tab -->
+    <section id="tab-live" class="tab-content active">
+      <div class="live-container">
+        <div id="player-wrapper">
+          <video id="live-video" controls autoplay muted playsinline></video>
+          <div id="stream-overlay" class="overlay">
+            <p>Camera stream</p>
+            <div class="overlay-buttons">
+              <button id="btn-start-stream" class="btn btn-primary">HD Stream</button>
+              <button id="btn-wake" class="btn">Wake Camera</button>
+            </div>
+            <p class="hint" id="wake-hint"></p>
+          </div>
+        </div>
+        <div class="live-controls">
+          <button id="btn-stop-stream" class="btn btn-danger" disabled>Stop Stream</button>
+          <button id="btn-refresh-stream" class="btn" disabled>Refresh</button>
+          <button id="btn-snapshot" class="btn">Snapshot</button>
+        </div>
+        <img id="snapshot-img" class="hidden snapshot-preview" alt="Snapshot" />
+      </div>
+    </section>
+
+    <!-- Recordings Tab -->
+    <section id="tab-recordings" class="tab-content">
+      <div class="recordings-header">
+        <h2>Camera Recordings</h2>
+        <div class="date-picker">
+          <label for="rec-date">Date:</label>
+          <input type="date" id="rec-date" />
+          <button id="btn-load-recordings" class="btn btn-primary">Load</button>
+          <button id="btn-load-dates" class="btn">Available Dates</button>
+        </div>
+      </div>
+
+      <div id="available-dates" class="dates-panel hidden"></div>
+
+      <div id="recordings-list" class="recordings-grid">
+        <p class="placeholder">Select a date and click Load to browse recordings.</p>
+      </div>
+
+      <div id="recording-player" class="hidden">
+        <h3 id="recording-title"></h3>
+        <video id="recording-video" controls playsinline></video>
+        <button id="btn-close-player" class="btn">Close</button>
+      </div>
+
+      <div id="local-recordings">
+        <h3>Downloaded Recordings</h3>
+        <div id="local-list"></div>
+      </div>
+    </section>
+
+    <!-- Settings Tab -->
+    <section id="tab-settings" class="tab-content">
+      <div class="settings-card">
+        <h2>Camera Info</h2>
+        <div id="camera-info">
+          <p>Loading...</p>
+        </div>
+        <div class="settings-actions">
+          <button id="btn-reconnect" class="btn btn-primary">Reconnect Camera</button>
+          <button id="btn-privacy-on" class="btn btn-danger">Privacy Mode ON</button>
+          <button id="btn-privacy-off" class="btn">Privacy Mode OFF</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
