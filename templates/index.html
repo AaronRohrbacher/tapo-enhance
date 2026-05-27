@@ -3,97 +3,131 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Tapo D225 Viewer</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <title>tapo — D225 viewer</title>
+  <link rel="stylesheet" href="/static/style.css?v={{ asset_v }}">
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 </head>
 <body>
-  <header>
-    <h1>Tapo D225 Doorbell</h1>
-    <div id="camera-status" class="status disconnected">
-      <span class="dot"></span>
-      <span id="status-text">Connecting...</span>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot" id="status-dot"></span>
+      <strong>tapo</strong>
+      <span class="muted" id="status-text">connecting…</span>
+    </div>
+    <nav class="tabs">
+      <button class="tab active" data-tab="live">live</button>
+      <button class="tab" data-tab="archive">archive</button>
+      <button class="tab" data-tab="local">local</button>
+      <button class="tab" data-tab="settings">settings</button>
+    </nav>
+    <div class="meta">
+      <span id="gateway-state" class="muted">idle</span>
+      <span id="clock" class="muted">--:--:--</span>
     </div>
   </header>
 
-  <nav>
-    <button class="tab active" data-tab="live">Live Feed</button>
-    <button class="tab" data-tab="recordings">Recordings</button>
-    <button class="tab" data-tab="settings">Settings</button>
-  </nav>
-
   <main>
-    <!-- Live Feed Tab -->
+
+    <!-- LIVE -->
     <section id="tab-live" class="tab-content active">
-      <div class="live-container">
-        <div id="player-wrapper">
-          <video id="live-video" controls autoplay muted playsinline></video>
-          <div id="stream-overlay" class="overlay">
-            <p>Camera stream</p>
-            <div class="overlay-buttons">
-              <button id="btn-start-stream" class="btn btn-primary">HD Stream</button>
-              <button id="btn-wake" class="btn">Wake Camera</button>
+      <div class="card live-card">
+        <div class="card-header">live preview</div>
+        <div class="screen">
+          <video id="live-video" controls autoplay playsinline muted></video>
+          <div id="live-overlay" class="overlay">
+            <p class="overlay-msg" id="live-msg">no signal</p>
+            <div class="overlay-actions">
+              <button id="btn-live-start" class="btn primary">start live</button>
+              <button id="btn-recover" class="btn">reconnect</button>
             </div>
-            <p class="hint" id="wake-hint"></p>
           </div>
         </div>
-        <div class="live-controls">
-          <button id="btn-stop-stream" class="btn btn-danger" disabled>Stop Stream</button>
-          <button id="btn-refresh-stream" class="btn" disabled>Refresh</button>
-          <button id="btn-snapshot" class="btn">Snapshot</button>
+        <div class="row">
+          <button id="btn-live-stop" class="btn" disabled>stop</button>
+          <button id="btn-live-refresh" class="btn" disabled>refresh</button>
+          <button id="btn-snapshot" class="btn">snapshot</button>
+          <button id="btn-mute" class="btn">unmute</button>
         </div>
-        <img id="snapshot-img" class="hidden snapshot-preview" alt="Snapshot" />
+        <img id="snapshot-img" class="snapshot hidden" />
       </div>
     </section>
 
-    <!-- Recordings Tab -->
-    <section id="tab-recordings" class="tab-content">
-      <div class="recordings-header">
-        <h2>Camera Recordings</h2>
-        <div class="date-picker">
-          <label for="rec-date">Date:</label>
-          <input type="date" id="rec-date" />
-          <button id="btn-load-recordings" class="btn btn-primary">Load</button>
-          <button id="btn-load-dates" class="btn">Available Dates</button>
+    <!-- ARCHIVE -->
+    <section id="tab-archive" class="tab-content">
+      <div class="card">
+        <div class="card-header">archive (sd card)</div>
+        <div class="row">
+          <input type="date" id="arch-date">
+          <button id="btn-arch-load" class="btn primary">load date</button>
+          <button id="btn-arch-dates" class="btn">list dates</button>
+          <button id="btn-arch-all" class="btn">load all (30d)</button>
+          <span class="grow"></span>
+          <button id="btn-arch-select-all" class="btn" disabled>select all</button>
+          <button id="btn-arch-bulk" class="btn" disabled>download selected</button>
+        </div>
+        <div id="arch-dates" class="dates hidden"></div>
+        <div id="arch-status" class="status-line hidden"></div>
+        <div id="arch-thumbs" class="status-line muted hidden"></div>
+        <div id="arch-grid" class="grid">
+          <p class="placeholder">pick a date to begin.</p>
         </div>
       </div>
-
-      <div id="available-dates" class="dates-panel hidden"></div>
-
-      <div id="recordings-list" class="recordings-grid">
-        <p class="placeholder">Select a date and click Load to browse recordings.</p>
-      </div>
-
-      <div id="recording-player" class="hidden">
-        <h3 id="recording-title"></h3>
-        <video id="recording-video" controls playsinline></video>
-        <button id="btn-close-player" class="btn">Close</button>
-      </div>
-
-      <div id="local-recordings">
-        <h3>Downloaded Recordings</h3>
-        <div id="local-list"></div>
+      <div id="player-card" class="card hidden">
+        <div class="card-header">
+          <span id="player-title">playback</span>
+          <button id="btn-player-close" class="btn small">close</button>
+        </div>
+        <video id="player-video" controls playsinline></video>
+        <div id="player-status" class="status-line muted"></div>
       </div>
     </section>
 
-    <!-- Settings Tab -->
+    <!-- LOCAL -->
+    <section id="tab-local" class="tab-content">
+      <div class="card">
+        <div class="card-header">downloaded clips</div>
+        <div id="local-list" class="local-list"></div>
+      </div>
+      <div class="card">
+        <div class="card-header">cache</div>
+        <div id="cache-rows" class="cache-rows"></div>
+        <div class="row">
+          <button class="btn" data-cache="thumbs">purge thumbs</button>
+          <button class="btn" data-cache="previews">purge previews</button>
+          <button class="btn" data-cache="stream">purge stream</button>
+          <button class="btn warn" data-cache="recordings">purge recordings</button>
+          <button class="btn warn" data-cache="all">purge all</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- SETTINGS -->
     <section id="tab-settings" class="tab-content">
-      <div class="settings-card">
-        <h2>Camera Info</h2>
-        <div id="camera-info">
-          <p>Loading...</p>
-        </div>
-        <div class="settings-actions">
-          <button id="btn-reconnect" class="btn btn-primary">Reconnect Camera</button>
-          <button id="btn-privacy-on" class="btn btn-danger">Privacy Mode ON</button>
-          <button id="btn-privacy-off" class="btn">Privacy Mode OFF</button>
+      <div class="card">
+        <div class="card-header">camera</div>
+        <div id="cam-info" class="info"></div>
+        <div class="row">
+          <button id="btn-reconnect" class="btn">reconnect</button>
+          <button id="btn-privacy-on" class="btn warn">privacy on</button>
+          <button id="btn-privacy-off" class="btn">privacy off</button>
+          <button id="btn-reboot" class="btn warn">reboot</button>
         </div>
       </div>
+      <div class="card">
+        <div class="card-header">events (last 24h)</div>
+        <button id="btn-events" class="btn">load events</button>
+        <pre id="events-log" class="log"></pre>
+      </div>
     </section>
+
   </main>
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-  <script src="/static/app.js"></script>
+  <script src="/static/state.js?v={{ asset_v }}"></script>
+  <script src="/static/api.js?v={{ asset_v }}"></script>
+  <script src="/static/ui.js?v={{ asset_v }}"></script>
+  <script src="/static/main.js?v={{ asset_v }}"></script>
 </body>
 </html>
