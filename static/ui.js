@@ -111,8 +111,7 @@
         <div class="${cls}" data-key="${k}">
           <div class="thumb-box">
             <img class="thumb${ts === "failed" ? " failed" : ""}"
-                 loading="lazy"
-                 src="/api/thumb/${c.date}/${c.startTime}/${c.endTime}" />
+                 src="/api/thumb/${c.date}/${c.startTime}/${c.endTime}?s=${ts}" />
             <span class="badge ${ts}">${ts}</span>
             <span class="check" data-action="toggle">✓</span>
           </div>

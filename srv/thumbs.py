@@ -200,6 +200,19 @@ class ThumbBackfill:
         self._q.put_nowait(clip)
         return "queued"
 
+    def requeue(self, clip: Clip) -> None:
+        """Force a clip back into the queue, regardless of prior status. Used
+        when the thumb file was deleted out-of-band (cache clear) and the
+        in-memory `ready` state is now lying."""
+        key = clip.key
+        self._state[key] = {
+            "status": "queued",
+            "attempts": 0,
+            "error": None,
+            "clip": clip,
+        }
+        self._q.put_nowait(clip)
+
     def retry_failed_for_date(self, date: str) -> int:
         """Reset all failed thumbs for `date` back to the queue."""
         n = 0

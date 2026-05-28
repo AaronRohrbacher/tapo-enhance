@@ -5,6 +5,21 @@
   const { $, $$, toast } = UI;
   const { state, set, subscribe, clipKey } = S;
 
+  // ── SFX mute toggle ──────────────────────────────────────────────────
+  const sfxBtn = $("#btn-sfx");
+  function paintSfxBtn() {
+    if (!sfxBtn) return;
+    const on = SFX.enabled();
+    sfxBtn.textContent = on ? "◍ sfx" : "◌ sfx";
+    sfxBtn.classList.toggle("primary", on);
+  }
+  paintSfxBtn();
+  if (sfxBtn) sfxBtn.addEventListener("click", () => {
+    SFX.set(!SFX.enabled());
+    paintSfxBtn();
+    if (SFX.enabled()) SFX.blip();
+  });
+
   // ── render subscription ──────────────────────────────────────────────
   subscribe((s) => {
     UI.renderCamera(s);
@@ -33,6 +48,7 @@
 
   // ── camera status polling ────────────────────────────────────────────
   async function loadStatus() {
+    const wasConnected = state.camera.status === "connected";
     set((s) => { s.camera.status = "connecting"; });
     const r = await API.get("/api/camera/status");
     if (r.ok) {
@@ -42,9 +58,11 @@
         s.camera.host = r.data.host;
       });
       UI.renderSettings(r.data);
+      if (!wasConnected) SFX.access();
       return true;
     }
     set((s) => { s.camera.status = "disconnected"; });
+    SFX.alert();
     if (r.retryable) toast("camera offline — try [reconnect]", "error");
     else if (r.code === "CAMERA_AUTH") toast("auth failed — check TAPO_PASSWORD in .env", "error");
     else if (r.code === "CAMERA_NOT_CONFIGURED") toast("set TAPO_HOST + TAPO_PASSWORD in .env", "error");
@@ -106,9 +124,11 @@
 
   $("#btn-live-start").addEventListener("click", async () => {
     set((s) => { s.live.status = "starting"; });
+    SFX.powerOn();
     const r = await API.post("/api/stream/start", {});
     if (!r.ok) {
       set((s) => { s.live.status = "error"; s.live.error = r.error; });
+      SFX.err();
       toast("live failed: " + r.error, "error");
       if (r.retryable) recover();
       return;
@@ -120,6 +140,7 @@
   $("#btn-live-stop").addEventListener("click", async () => {
     if (hls) { hls.destroy(); hls = null; }
     video.src = "";
+    SFX.powerOff();
     await API.post("/api/stream/stop", {});
     set((s) => { s.live.status = "idle"; s.live.url = null; });
   });
@@ -131,6 +152,7 @@
   $("#btn-snapshot").addEventListener("click", async () => {
     const img = $("#snapshot-img");
     img.classList.add("hidden");
+    SFX.shutter();
     try {
       const res = await fetch("/api/snapshot?t=" + Date.now());
       if (res.ok) {
@@ -140,9 +162,11 @@
         toast("snapshot captured", "success");
       } else {
         const j = await res.json();
+        SFX.err();
         toast("snapshot: " + (j.error || res.status), "error");
       }
     } catch (e) {
+      SFX.err();
       toast("snapshot error: " + e.message, "error");
     }
   });
@@ -151,15 +175,19 @@
 
   function recover() {
     set((s) => { s.camera.status = "connecting"; });
+    SFX.scan();
     const es = new EventSource("/api/camera/recover");
     es.onmessage = (e) => {
       try {
         const evt = JSON.parse(e.data);
-        toast(evt.message, evt.phase === "done" ? (evt.ok ? "success" : "error") : "info");
         if (evt.phase === "done") {
           es.close();
-          if (evt.ok) loadStatus();
+          if (evt.ok) { SFX.access(); loadStatus(); }
+          else SFX.denied();
+        } else {
+          SFX.scan();
         }
+        toast(evt.message, evt.phase === "done" ? (evt.ok ? "success" : "error") : "info");
       } catch {}
     };
     es.onerror = () => { es.close(); };
@@ -237,7 +265,10 @@
     });
   }
 
-  // Rolling thumb-status poll. Stops itself when nothing's pending.
+  // Rolling thumb-status poll. Stops only when the FRONTEND view of every
+  // clip is settled (ready or failed). Don't trust backend counts to gate
+  // stopping — those only include clips that called `backfill.request`,
+  // and clips served from local cache never go through it.
   let thumbPollTimer = null;
   async function pollThumbStatus() {
     const date = state.archive.date;
@@ -250,12 +281,14 @@
           total: c.total, ready: c.ready, queued: c.queued, running: c.running, failed: c.failed,
         };
       });
-      // Refresh the in-grid badges by HEADing each clip whose status hasn't ripened.
       await refreshClipThumbs();
-      const more = c.queued + c.running > 0;
-      clearTimeout(thumbPollTimer);
-      if (more) thumbPollTimer = setTimeout(pollThumbStatus, 1500);
     }
+    const settled = state.archive.clips.every((cl) => {
+      const st = state.archive.thumbs[clipKey(cl)];
+      return st === "ready" || st === "failed";
+    });
+    clearTimeout(thumbPollTimer);
+    if (!settled) thumbPollTimer = setTimeout(pollThumbStatus, 1500);
   }
   async function refreshClipThumbs() {
     const clips = state.archive.clips;
@@ -266,16 +299,12 @@
         const res = await fetch(`/api/thumb/${c.date}/${c.startTime}/${c.endTime}`, { method: "HEAD" });
         const status = res.headers.get("X-Thumb-Status") || "queued";
         const err = res.headers.get("X-Thumb-Error") || "";
-        const flipped = state.archive.thumbs[k] !== status;
+        // renderArchive embeds the status in the img URL (`?s=${ts}`), so
+        // a state change here naturally swaps the img to a fresh fetch.
         set((s) => {
           s.archive.thumbs[k] = status;
           if (err) s.archive.thumbErrors[k] = err;
         });
-        if (status === "ready" && flipped) {
-          // Force <img> to reload by appending a cache-bust.
-          const img = document.querySelector(`.clip-card[data-key="${k}"] img.thumb`);
-          if (img) img.src = `/api/thumb/${c.date}/${c.startTime}/${c.endTime}?t=${Date.now()}`;
-        }
       } catch {}
     }));
   }
@@ -320,19 +349,27 @@
   async function downloadClip(clip) {
     const k = clipKey(clip);
     set((s) => { s.downloads[k] = "running"; });
+    SFX.transfer();
     const r = await API.post("/api/recordings/download", clip);
     if (r.ok) {
       set((s) => { s.downloads[k] = "done"; });
+      SFX.done();
       toast(`saved ${clip.date} • ${formatHMS(clip.startTime)}`, "success");
       loadLocal();
     } else {
       set((s) => { s.downloads[k] = "failed"; });
+      SFX.denied();
       toast("download failed: " + r.error, "error");
       if (r.retryable) recover();
     }
   }
 
+  // Track the currently-watched clip so stale listeners (from a previous
+  // watch click) don't fire and stomp on the new player state.
+  let watchSeq = 0;
+
   async function watchClip(clip) {
+    const mySeq = ++watchSeq;
     const card = $("#player-card");
     const vid = $("#player-video");
     const status = $("#player-status");
@@ -341,30 +378,67 @@
     set((s) => { s.player.clip = clip; s.player.status = "loading"; });
     $("#player-title").textContent = `${clip.date} • ${formatHMS(clip.startTime)} – ${formatHMS(clip.endTime)}`;
     const url = `/api/recordings/stream/${clip.date}/${clip.startTime}/${clip.endTime}?t=${Date.now()}`;
-    vid.src = url;
-    vid.muted = false;
-    vid.play().catch(() => {});
+
     let done = false;
-    vid.addEventListener("loadeddata", () => {
+    const onReady = () => {
+      if (mySeq !== watchSeq || done) return;
       done = true;
       status.textContent = "";
       set((s) => { s.player.status = "playing"; });
-    }, { once: true });
+      // Removing all candidate listeners: which one fires first depends on
+      // browser + whether the file is already cached locally.
+      vid.removeEventListener("loadeddata", onReady);
+      vid.removeEventListener("loadedmetadata", onReady);
+      vid.removeEventListener("canplay", onReady);
+      vid.removeEventListener("playing", onReady);
+    };
+    vid.addEventListener("loadeddata", onReady);
+    vid.addEventListener("loadedmetadata", onReady);
+    vid.addEventListener("canplay", onReady);
+    vid.addEventListener("playing", onReady);
+
+    // Reset element state before assigning new src so a half-loaded prior
+    // source doesn't leave the element in a stuck state.
+    try { vid.pause(); } catch {}
+    vid.removeAttribute("src");
+    vid.load();
+    vid.src = url;
+    vid.muted = false;
+    vid.play().catch(() => {});
+
+    // If the file was already buffered locally, readyState may already be
+    // >= HAVE_CURRENT_DATA by the time we attach. Cover that race.
+    if (vid.readyState >= 2) onReady();
+
+    // Cold watches (camera download) can take 30-90s. Switch the status
+    // text after a few seconds so the user knows we're not stuck.
+    setTimeout(() => {
+      if (done || mySeq !== watchSeq || vid.readyState >= 2) return;
+      status.textContent = "downloading from camera (this can take a while)…";
+    }, 4_000);
+
     setTimeout(async () => {
-      if (done) return;
-      try {
-        const head = await fetch(url, { method: "HEAD" });
-        if (!head.ok) {
-          const r = await fetch(url);
-          let err = "playback timed out";
-          try { const j = await r.json(); err = j.error || err; } catch {}
-          status.textContent = err;
-          set((s) => { s.player.status = "error"; });
-          toast("playback failed: " + err, "error");
-        }
-      } catch (e) {
+      // Re-check guards before AND after every await — the video may have
+      // started playing or the user may have moved on by the time HEAD
+      // returns (HEAD waits for any in-flight download to finish).
+      if (done || mySeq !== watchSeq || vid.readyState >= 2) return;
+      let head;
+      try { head = await fetch(url, { method: "HEAD" }); }
+      catch (e) {
+        if (done || mySeq !== watchSeq || vid.readyState >= 2) return;
         status.textContent = e.message;
         set((s) => { s.player.status = "error"; });
+        return;
+      }
+      if (done || mySeq !== watchSeq || vid.readyState >= 2) return;
+      if (!head.ok) {
+        const r = await fetch(url);
+        if (done || mySeq !== watchSeq || vid.readyState >= 2) return;
+        let err = "playback timed out";
+        try { const j = await r.json(); err = j.error || err; } catch {}
+        status.textContent = err;
+        set((s) => { s.player.status = "error"; });
+        toast("playback failed: " + err, "error");
       }
     }, 30_000);
     card.scrollIntoView({ behavior: "smooth" });
@@ -476,6 +550,9 @@
   }
 
   // ── boot ─────────────────────────────────────────────────────────────
+  // Boot jingle plays on first user interaction (audio context can't start
+  // before that anyway). Wire to the first click so it's tied to volition.
+  document.addEventListener("click", () => SFX.boot(), { once: true });
   (async function init() {
     await loadStatus();
     loadLocal();

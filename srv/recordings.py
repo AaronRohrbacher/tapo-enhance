@@ -64,6 +64,7 @@ def parse_clips(raw, date: str) -> list[Clip]:
     Invalid entries are silently skipped.
     """
     out: list[Clip] = []
+    seen: set[tuple[int, int]] = set()
     items = raw if isinstance(raw, list) else [raw]
 
     def _push(s, e):
@@ -73,6 +74,10 @@ def parse_clips(raw, date: str) -> list[Clip]:
             return
         if ei <= si:
             return
+        key = (si, ei)
+        if key in seen:
+            return
+        seen.add(key)
         out.append(Clip(date, si, ei))
 
     for item in items:

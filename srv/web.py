@@ -105,7 +105,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         # Cache-bust static assets by mtime — every file the template
         # references must be in this list, or browsers will serve stale JS.
         v = 0
-        for f in ("style.css", "state.js", "api.js", "ui.js", "main.js"):
+        for f in ("style.css", "state.js", "api.js", "sfx.js", "ui.js", "main.js"):
             p = static_dir / f
             try:
                 v = max(v, int(p.stat().st_mtime))
@@ -268,14 +268,21 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         existing = paths.thumb(clip)
         if existing.exists() and existing.stat().st_size > 100:
             return FileResponse(existing, media_type="image/jpeg",
-                                headers={"X-Thumb-Status": "ready"})
+                                headers={"X-Thumb-Status": "ready",
+                                         "Cache-Control": "public, max-age=86400"})
         # Fast path: extract from cached recording without a camera pull.
         local = await extract_from_local(clip, paths)
         if local is not None:
             return FileResponse(local, media_type="image/jpeg",
-                                headers={"X-Thumb-Status": "ready"})
-        # Otherwise enqueue background pull and serve a placeholder.
+                                headers={"X-Thumb-Status": "ready",
+                                         "Cache-Control": "public, max-age=86400"})
+        # Otherwise enqueue background pull and serve a placeholder. Never
+        # advertise "ready" with placeholder content — that desyncs the UI.
         status = backfill.request(clip)
+        if status == "ready":
+            # In-memory state is stale (thumb file got deleted). Re-queue.
+            backfill.requeue(clip)
+            status = "queued"
         st = backfill.state(clip.key) or {}
         return Response(
             content=_PLACEHOLDER,
