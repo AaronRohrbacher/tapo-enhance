@@ -1,0 +1,21 @@
+# Warm monochrome CRT.
+id: amber
+name: Amber Terminal
+colors:
+  bg: "#080400"
+  bg-elev: "#160b00"
+  bg-elev-2: "#342000"
+  fg: "#ffb52e"
+  fg-bright: "#ffe0a0"
+  fg-dim: "#ad7217"
+  fg-faint: "#5e390c"
+  line: "#70440d"
+  line-bright: "#d68a16"
+  primary: "#ffad22"
+  primary-dim: "#b66e0d"
+  green: "#ffd166"
+  warn: "#ff4d4d"
+  warn-glow: "rgba(255, 77, 77, 0.4)"
+  glow: "rgba(255, 173, 34, 0.42)"
+  glow-soft: "rgba(255, 173, 34, 0.12)"
+  select: "rgba(255, 173, 34, 0.2)"

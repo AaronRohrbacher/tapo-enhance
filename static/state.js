@@ -6,21 +6,24 @@
   "use strict";
 
   const state = {
-    camera: { status: "connecting", host: "", alias: "" },
+    camera: { status: "connecting", host: "", alias: "", battery: null, charging: false },
+    features: null,
     live: { status: "idle", url: null, error: null },
     archive: {
       date: "",
       clips: [],
       selected: new Set(),
-      thumbs: {}, // key -> "ready" | "queued" | "running" | "failed"
+      thumbs: {}, // key -> "idle" | "ready" | "queued" | "running" | "failed"
       thumbErrors: {}, // key -> message
-      thumbCounts: { total: 0, ready: 0, queued: 0, running: 0, failed: 0 },
+      thumbCounts: { total: 0, idle: 0, ready: 0, queued: 0, running: 0, failed: 0 },
     },
     player: { clip: null, status: "idle" },  // idle | loading | playing | error
     downloads: {}, // key -> "running" | "done" | "failed"
+    operations: {}, // operation:key -> last server-reported phase/progress/error
+    events: { status: "connecting", error: null },
     bulk: null, // { id, total, done, failed, current, status }
     local: [],
-    cache: { recordings: 0, thumbs: 0, previews: 0, stream: 0, total: 0 },
+    cache: { recordings: 0, thumbs: 0, previews: 0, playback: 0, stream: 0, total: 0 },
     gateway: { busy: null, queued: 0, liveAttached: false, liveRunning: false },
   };
 

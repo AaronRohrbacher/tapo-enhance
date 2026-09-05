@@ -1,0 +1,11 @@
+.git
+.venv
+.env
+cache
+.keys
+_old
+rebuild
+.pytest_cache
+__pycache__
+*.pyc
+tests

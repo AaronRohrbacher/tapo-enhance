@@ -4,10 +4,16 @@
 PY      := .venv/bin/python
 PYTEST  := .venv/bin/pytest
 
-.PHONY: run test test-browser test-all check fmt clean
+.PHONY: install install-dev run test test-browser test-all check fmt clean
+
+install:
+	$(PY) -m pip install -r requirements.txt
+
+install-dev:
+	$(PY) -m pip install -r requirements-dev.txt
 
 run:
-	$(PY) -m uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+	$(PY) app.py
 
 # Default suite — all unit + integration tests EXCEPT the playwright/browser
 # tests, which run in their own session because sync_playwright collides
@@ -22,7 +28,7 @@ test-browser:
 test-all: test test-browser
 
 clean:
-	rm -rf cache/stream cache/thumbs cache/previews
+	rm -rf cache/stream cache/thumbs cache/previews cache/playback
 	rm -rf __pycache__ srv/__pycache__ tests/__pycache__ .pytest_cache
 
 # Fast sanity check before committing.

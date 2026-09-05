@@ -115,9 +115,17 @@ class Paths:
         self.stream = self.root / "stream"
         self.thumbs = self.root / "thumbs"
         self.previews = self.root / "previews"
+        self.playback = self.root / "playback"
 
     def ensure(self) -> None:
-        for d in (self.root, self.recordings, self.stream, self.thumbs, self.previews):
+        for d in (
+            self.root,
+            self.recordings,
+            self.stream,
+            self.thumbs,
+            self.previews,
+            self.playback,
+        ):
             d.mkdir(parents=True, exist_ok=True)
 
     def recording(self, c: Clip) -> Path:
@@ -135,6 +143,7 @@ class Paths:
             "stream": self.stream,
             "thumbs": self.thumbs,
             "previews": self.previews,
+            "playback": self.playback,
         }
 
 

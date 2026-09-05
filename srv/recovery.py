@@ -46,7 +46,7 @@ async def recover(camera: CameraConnection) -> AsyncIterator[dict]:
             camera.invalidate()
         mac = await _to_thread(_learn_mac_for_host, ip)
         if mac:
-            cfg.mac = mac
+            cfg.remember_mac(mac)
         yield {"phase": "found", "ip": ip, "mac": cfg.mac, "message": f"camera at {ip}"}
         yield {"phase": "done", "ok": True, "ip": ip, "mac": cfg.mac, "message": "uplink restored"}
         return
@@ -59,7 +59,7 @@ async def recover(camera: CameraConnection) -> AsyncIterator[dict]:
     if not cfg.mac:
         learned = await _to_thread(_learn_mac_for_host, cfg.host)
         if learned:
-            cfg.mac = learned
+            cfg.remember_mac(learned)
             yield {"phase": "mac_learned", "mac": cfg.mac,
                    "message": f"learned MAC {cfg.mac} from ARP for {cfg.host}"}
 

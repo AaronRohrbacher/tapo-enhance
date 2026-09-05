@@ -154,6 +154,26 @@ async def test_runner_exception_propagates_without_breaking_the_queue(gw):
     assert await gw.submit_download(B, ok) == "fine"
 
 
+async def test_user_cancelled_playback_does_not_stop_gateway(gw):
+    started = asyncio.Event()
+
+    async def playback(_t, cancel):
+        started.set()
+        await cancel.wait()
+        raise asyncio.CancelledError
+
+    future = gw.submit_playback(A, playback)
+    await started.wait()
+    gw.cancel_playback()
+    with pytest.raises(asyncio.CancelledError):
+        await future
+
+    async def ok(_t, _c):
+        return "still running"
+
+    assert await gw.submit_download(B, ok) == "still running"
+
+
 async def test_get_tapo_failure_propagates_to_future(gw):
     g = CameraGateway(get_tapo=lambda: (_ for _ in ()).throw(RuntimeError("no creds")))
     await g.start()

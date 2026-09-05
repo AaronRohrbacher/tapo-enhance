@@ -77,7 +77,14 @@ class FakeTapo:
         }
 
     def getBatteryStatus(self):
-        return {"battery_percent": 73, "is_charging": False}
+        return {
+            "battery": {
+                "status": {
+                    "battery_percent": 73,
+                    "battery_charging": "NO",
+                }
+            }
+        }
 
     def getRecordingsList(self, start_date="", end_date=""):
         self._log("getRecordingsList", start_date, end_date)
@@ -223,11 +230,18 @@ def make_fake_media_session(tmp_path):
         audio_total = bytes((i * 31) & 0xFF for i in range(8000 * duration)) if with_audio else b""
 
         class Resp:
-            def __init__(self, plaintext, mimetype="video/mp2t", audio_payload=b""):
+            def __init__(
+                self,
+                plaintext,
+                mimetype="video/mp2t",
+                audio_payload=b"",
+                json_data=None,
+            ):
                 self.plaintext = plaintext
                 self.mimetype = mimetype
                 self.audioPayload = audio_payload
                 self.audioPayloadType = "alaw"
+                self.json_data = json_data
 
         class FakeSession:
             opened = False
@@ -242,7 +256,35 @@ def make_fake_media_session(tmp_path):
             async def close(self):
                 FakeSession.closed = True
 
+            async def __aenter__(self):
+                await self.start()
+                return self
+
+            async def __aexit__(self, *_args):
+                await self.close()
+
             async def transceive(self, _req, _mime, **_kwargs):
+                request = __import__("json").loads(_req)
+                if "download" in request.get("params", {}):
+                    started = {"error_code": 0, "params": {"session_id": 1}}
+                    yield Resp(
+                        __import__("json").dumps(started).encode(),
+                        mimetype="application/json",
+                        json_data=started,
+                    )
+                    yield Resp(ROOT.joinpath(".placeholder.jpg").read_bytes(), mimetype="image/jpeg")
+                    finished = {
+                        "params": {
+                            "event_type": "stream_status",
+                            "status": "finished",
+                        }
+                    }
+                    yield Resp(
+                        __import__("json").dumps(finished).encode(),
+                        mimetype="application/json",
+                        json_data=finished,
+                    )
+                    return
                 CHUNK = 16 * 1024
                 chunks = [ts_bytes[i:i + CHUNK] for i in range(0, len(ts_bytes), CHUNK)] or [b""]
                 per_audio = (len(audio_total) // max(1, len(chunks))) // 160 * 160 if audio_total else 0

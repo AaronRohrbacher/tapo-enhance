@@ -1,0 +1,29 @@
+services:
+  tapo-enhance:
+    build:
+      context: .
+    image: ${TAPO_ENHANCE_IMAGE:-ghcr.io/aaronrohrbacher/tapo-enhance:latest}
+    pull_policy: missing
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    environment:
+      APP_PORT: ${APP_PORT:-8000}
+      TAPO_CACHE_ROOT: /data
+      TAPO_KEY_ROOT: /keys
+    volumes:
+      - ./cache:/data
+      - ./custom-themes:/app/themes/custom:ro
+      - ./.keys:/keys
+    restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+
+  updater:
+    image: containrrr/watchtower:1.7.1
+    profiles: ["updates"]
+    command: --label-enable --cleanup --interval 300
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped

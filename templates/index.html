@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>tapo — D225 viewer</title>
+  <title>Tapo Enhance</title>
+  <link rel="icon" href="/static/favicon.svg?v={{ asset_v }}" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css?v={{ asset_v }}">
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 </head>
@@ -12,7 +13,7 @@
   <header class="topbar">
     <div class="brand">
       <span class="dot" id="status-dot"></span>
-      <strong>tapo</strong>
+      <strong>Tapo Enhance</strong>
       <span class="muted" id="status-text">connecting…</span>
     </div>
     <nav class="tabs">
@@ -22,13 +23,37 @@
       <button class="tab" data-tab="settings">settings</button>
     </nav>
     <div class="meta">
-      <span id="gateway-state" class="muted">idle</span>
+      <select id="theme-select" class="btn small" title="color theme" aria-label="color theme"></select>
+      <span id="battery-status" class="muted" title="camera battery">battery unavailable</span>
+      <span id="gateway-state" class="muted">camera ready</span>
       <button id="btn-sfx" class="btn small" title="toggle UI sounds">◍ sfx</button>
       <span id="clock" class="muted">--:--:--</span>
+      <span class="muted">v{{ app_version }}</span>
     </div>
   </header>
 
   <main>
+
+    <section id="setup-panel" class="card setup-card hidden">
+      <div class="card-header">configure camera</div>
+      <p class="muted">Credentials are encrypted immediately and are never persisted as plaintext.</p>
+      <form id="camera-config-form" class="config-form">
+        <input name="mac" type="hidden">
+        <label>camera address<input name="host" required placeholder="select a discovered camera or enter its IP"></label>
+        <label>camera user or Tapo email<input name="user" value="admin" required autocomplete="username"></label>
+        <label>camera/Tapo password<input name="password" type="password" required autocomplete="current-password"></label>
+        <p class="muted">For a battery-mode D225 with Camera Account disabled, use your Tapo account password. The app will try the compatible <code>admin</code> login automatically and use the same password for local media encryption.</p>
+        <label>LAN subnet<input name="subnet" placeholder="automatic, or 192.168.1.0/24"></label>
+        <div class="row">
+          <button type="button" id="btn-discover" class="btn">scan LAN for cameras</button>
+          <span id="discovery-progress" class="muted"></span>
+        </div>
+        <div id="discovery-results" class="discovery-results hidden"></div>
+        <button type="submit" class="btn primary">save and connect</button>
+        <button type="button" id="btn-config-cancel" class="btn">cancel</button>
+        <span id="config-progress" class="muted"></span>
+      </form>
+    </section>
 
     <!-- LIVE -->
     <section id="tab-live" class="tab-content active">
@@ -96,6 +121,7 @@
         <div class="row">
           <button class="btn" data-cache="thumbs">purge thumbs</button>
           <button class="btn" data-cache="previews">purge previews</button>
+          <button class="btn" data-cache="playback">purge playback</button>
           <button class="btn" data-cache="stream">purge stream</button>
           <button class="btn warn" data-cache="recordings">purge recordings</button>
           <button class="btn warn" data-cache="all">purge all</button>
@@ -113,7 +139,16 @@
           <button id="btn-privacy-on" class="btn warn">privacy on</button>
           <button id="btn-privacy-off" class="btn">privacy off</button>
           <button id="btn-reboot" class="btn warn">reboot</button>
+          <button id="btn-configure" class="btn">configure another camera</button>
         </div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <span>device features</span>
+          <button id="btn-features-refresh" class="btn small">refresh</button>
+        </div>
+        <div id="feature-status" class="info"><p class="muted">open settings to load camera features.</p></div>
+        <div id="feature-controls" class="feature-controls"></div>
       </div>
       <div class="card">
         <div class="card-header">events (last 24h)</div>

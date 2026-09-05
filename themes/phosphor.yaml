@@ -1,0 +1,21 @@
+# Tapo Enhance's original theme. Copy this file to create your own.
+id: phosphor
+name: Phosphor (default)
+colors:
+  bg: "#000300"
+  bg-elev: "#021004"
+  bg-elev-2: "#062c10"
+  fg: "#6cff8b"
+  fg-bright: "#aaffc3"
+  fg-dim: "#2c8a3e"
+  fg-faint: "#144a1c"
+  line: "#114a1d"
+  line-bright: "#16a13c"
+  primary: "#29ff5c"
+  primary-dim: "#16a13c"
+  green: "#29ff5c"
+  warn: "#ff3344"
+  warn-glow: "rgba(255, 51, 68, 0.4)"
+  glow: "rgba(41, 255, 92, 0.45)"
+  glow-soft: "rgba(41, 255, 92, 0.12)"
+  select: "rgba(41, 255, 92, 0.18)"

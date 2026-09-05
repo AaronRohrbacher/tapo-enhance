@@ -56,6 +56,7 @@ class LiveConsumer(Protocol):
     async def started(self) -> None: ...
     async def feed(self, ts_chunk: bytes) -> None: ...
     async def paused(self) -> None: ...
+    async def reconnecting(self) -> None: ...
     async def stopped(self) -> None: ...
 
 
@@ -82,14 +83,18 @@ class CameraGateway:
         get_tapo: Callable[[], Any],
         live_source: LiveSource | None = None,
         on_camera_error: Callable[[BaseException], Awaitable[None]] | None = None,
+        on_event: Callable[[dict], None] | None = None,
     ):
         """`get_tapo` returns an authenticated Tapo client. `live_source` is the
         coroutine that, when called, opens the camera media session and pushes
-        TS chunks to a LiveConsumer until the cancel event is set. Both are
+        TS chunks to a LiveConsumer until the cancel event is set. `on_event`,
+        if given, is called (synchronously, non-blocking) with a status dict on
+        every state change, so the UI can be pushed instead of polling. All are
         injected so tests can substitute fakes."""
         self._get_tapo = get_tapo
         self._live_source = live_source
         self._on_camera_error = on_camera_error
+        self._on_event = on_event
         self._queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
         self._inflight: dict[str, _TransientJob] = {}
         self._seq = 0
@@ -98,6 +103,8 @@ class CameraGateway:
         self._live_consumer: LiveConsumer | None = None
         self._live_task: asyncio.Task | None = None
         self._live_cancel = asyncio.Event()
+        self._live_restarts = 0
+        self._live_error: str | None = None
         # Set whenever the worker is currently inside a transient runner; lets
         # tests assert no overlap with live, and is the fact every "no
         # contention" property test depends on.
@@ -132,6 +139,21 @@ class CameraGateway:
     def submit_download(self, clip: Clip, runner: Runner, *, label: str = "") -> asyncio.Future:
         return self._submit(Priority.DOWNLOAD, f"dl:{clip.key}", runner, label or f"dl {clip.key}")
 
+    def submit_playback(self, clip: Clip, runner: Runner, *, label: str = "") -> asyncio.Future:
+        """Submit transient viewing work without conflating it with an archive save."""
+        for key, job in tuple(self._inflight.items()):
+            if key.startswith("play:") and key != f"play:{clip.key}":
+                job.cancel.set()
+        return self._submit(Priority.DOWNLOAD, f"play:{clip.key}", runner, label or f"play {clip.key}")
+
+    def cancel_playback(self) -> list[asyncio.Future]:
+        futures = []
+        for key, job in tuple(self._inflight.items()):
+            if key.startswith("play:"):
+                job.cancel.set()
+                futures.append(job.future)
+        return futures
+
     def submit_thumb(self, clip: Clip, runner: Runner, *, label: str = "") -> asyncio.Future:
         return self._submit(Priority.THUMB, f"th:{clip.key}", runner, label or f"th {clip.key}")
 
@@ -142,11 +164,13 @@ class CameraGateway:
             raise RuntimeError("gateway has no live_source configured")
         self._live_consumer = consumer
         self._wake.set()
+        self._emit()
 
     async def detach_live(self) -> None:
         consumer = self._live_consumer
         self._live_consumer = None
         await self._stop_live_if_running(for_pause=False)
+        self._emit()
         if consumer is not None:
             try:
                 await consumer.stopped()
@@ -166,6 +190,21 @@ class CameraGateway:
 
     def live_running(self) -> bool:
         return self._live_task is not None and not self._live_task.done()
+
+    def status(self) -> dict:
+        return {
+            "type": "gateway",
+            "busy": self._busy_kind,
+            "queued": self.queued_count(),
+            "liveAttached": self.live_attached(),
+            "liveRunning": self.live_running(),
+            "liveRestarts": self._live_restarts,
+            "liveError": self._live_error,
+        }
+
+    def _emit(self) -> None:
+        if self._on_event is not None:
+            self._on_event(self.status())
 
     @property
     def activity(self) -> list[tuple[str, str]]:
@@ -191,16 +230,20 @@ class CameraGateway:
         )
         self._inflight[key] = job
         self._queue.put_nowait(job)
-        # Tell the live loop to yield as soon as it can.
+        # Wake the worker immediately. It closes live once, drains the queued
+        # batch in priority order, then reconnects live. Native thumbnails are
+        # small JPEG requests, so they no longer justify indefinite deferral.
         self._live_cancel.set()
         self._wake.set()
         self._activity_log.append(("submit", key))
+        self._emit()
         return fut
 
     async def _run(self) -> None:
         try:
             while True:
-                # Drain transient queue first, every iteration.
+                # Close live once, drain the whole queued batch, then resume.
+                # No two media sessions overlap on the camera.
                 while not self._queue.empty():
                     job = await self._queue.get()
                     await self._stop_live_if_running(for_pause=True)
@@ -213,6 +256,7 @@ class CameraGateway:
                     self._live_task = asyncio.create_task(
                         self._live_loop(self._live_consumer), name="camera-live"
                     )
+                    self._emit()
 
                 # Wait for: new job, live ended, or wake.
                 self._wake.clear()
@@ -224,6 +268,12 @@ class CameraGateway:
                 )
                 for t in pending:
                     t.cancel()
+                # A camera stream can finish or fail without being explicitly
+                # preempted.  Reap its ffmpeg consumer before restarting it;
+                # previously the next cycle overwrote the process reference and
+                # left multiple ffmpegs fighting over one playlist.
+                if self._live_task is not None and self._live_task in done:
+                    await self._stop_live_if_running(for_pause=True)
         except asyncio.CancelledError:
             await self._stop_live_if_running(for_pause=False)
             raise
@@ -244,6 +294,7 @@ class CameraGateway:
                         pass
             self._live_task = None
             self._live_cancel.clear()
+            self._emit()
         # Emit pause/stop regardless of whether the inner task exited early.
         if had_task and for_pause and self._live_consumer is not None:
             try:
@@ -255,6 +306,7 @@ class CameraGateway:
         kind = "download" if job.priority == Priority.DOWNLOAD else "thumb"
         self._busy_kind = kind
         self._activity_log.append((kind, "start:" + job.key))
+        self._emit()
         try:
             try:
                 tapo = await asyncio.get_event_loop().run_in_executor(
@@ -271,7 +323,12 @@ class CameraGateway:
             except asyncio.CancelledError:
                 if not job.future.done():
                     job.future.cancel()
-                raise
+                self._activity_log.append((kind, "cancel:" + job.key))
+                # A runner uses its job event for ordinary user cancellation.
+                # Only propagate cancellation when the gateway worker itself
+                # is shutting down.
+                if not job.cancel.is_set():
+                    raise
             except Exception as e:
                 if not job.future.done():
                     job.future.set_exception(e)
@@ -284,6 +341,7 @@ class CameraGateway:
         finally:
             self._busy_kind = None
             self._inflight.pop(job.key, None)
+            self._emit()
 
     async def _live_loop(self, consumer: LiveConsumer) -> None:
         # `paused()` / `stopped()` are emitted by the gateway, NOT here, so
@@ -292,14 +350,26 @@ class CameraGateway:
             tapo = await asyncio.get_event_loop().run_in_executor(
                 None, self._get_tapo
             )
+            self._live_error = None
             await consumer.started()
             assert self._live_source is not None
             await self._live_source(tapo, self._live_cancel, consumer)
+            if not self._live_cancel.is_set():
+                reconnecting = getattr(consumer, "reconnecting", consumer.paused)
+                await reconnecting()
+                await asyncio.sleep(1.0)
         except asyncio.CancelledError:
             raise
         except BaseException as e:
+            self._live_restarts += 1
+            self._live_error = f"{type(e).__name__}: {e}"
             self._activity_log.append(("live", "error:" + repr(e)[:60]))
+            self._emit()
             await self._notify_camera_error(e)
+            if not self._live_cancel.is_set():
+                reconnecting = getattr(consumer, "reconnecting", consumer.paused)
+                await reconnecting()
+                await asyncio.sleep(1.0)
 
     async def _notify_camera_error(self, exc: BaseException) -> None:
         if self._on_camera_error is None:

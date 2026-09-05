@@ -120,7 +120,7 @@ def test_clip_to_json_uses_camera_field_names():
 def test_paths_layout_under_root(tmp_path):
     p = Paths(tmp_path / "cache")
     p.ensure()
-    for d in (p.recordings, p.thumbs, p.previews, p.stream):
+    for d in (p.recordings, p.thumbs, p.previews, p.playback, p.stream):
         assert d.exists() and d.is_dir()
 
 

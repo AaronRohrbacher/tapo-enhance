@@ -1,5 +1,4 @@
-"""Cache wipe utility. The user can purge any of: recordings, thumbs,
-previews, stream, or all. Targeted bucket wipes preserve sibling buckets."""
+"""Cache wipe utility. Targeted bucket wipes preserve sibling buckets."""
 
 from __future__ import annotations
 
@@ -10,7 +9,7 @@ from .errors import ApiError, Code
 from .recordings import Paths
 
 
-VALID_TARGETS = ("all", "recordings", "stream", "thumbs", "previews")
+VALID_TARGETS = ("all", "recordings", "stream", "thumbs", "previews", "playback")
 
 
 def clear(paths: Paths, target: str) -> dict:

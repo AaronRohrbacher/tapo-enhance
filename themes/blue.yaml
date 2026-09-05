@@ -1,0 +1,20 @@
+id: blue
+name: Midnight Blue
+colors:
+  bg: "#020611"
+  bg-elev: "#071326"
+  bg-elev-2: "#102b4d"
+  fg: "#77c8ff"
+  fg-bright: "#d4efff"
+  fg-dim: "#4389bd"
+  fg-faint: "#244d70"
+  line: "#24567d"
+  line-bright: "#3ea6ef"
+  primary: "#55bfff"
+  primary-dim: "#267eb8"
+  green: "#61e6a7"
+  warn: "#ff5370"
+  warn-glow: "rgba(255, 83, 112, 0.4)"
+  glow: "rgba(85, 191, 255, 0.4)"
+  glow-soft: "rgba(85, 191, 255, 0.12)"
+  select: "rgba(85, 191, 255, 0.2)"

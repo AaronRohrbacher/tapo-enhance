@@ -1,11 +1,11 @@
-"""Thumbnail generation. Three sources, in priority order:
+"""Thumbnail retrieval. Three sources, in priority order:
 
   1. Cached recording on disk → ffmpeg extracts a frame locally. Free,
      instantaneous, doesn't touch the camera.
   2. Cached preview on disk → ditto.
-  3. Camera → submit a SHORT (~2s) media-session pull through the gateway
-     as a THUMB-priority job. Always runs after any pending download and
-     never overlaps with the live stream.
+  3. Camera → request its native event JPEG through pytapo. No recording is
+     retrieved or decoded. The gateway serializes this with other camera
+     media operations.
 
 Public surface:
   - `extract_from_local(clip, paths)`: try sources 1 + 2, return path or None.
@@ -19,19 +19,16 @@ Public surface:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from pathlib import Path
 from typing import Any
 
+from pytapo.media_stream.recording_thumbnail import RecordingThumbnail
+
 from .errors import ApiError, Code
-from .media_session import build_playback_request, get_user_id, normalize_response, open_session
 from .recordings import Clip, Paths
 
 log = logging.getLogger(__name__)
-
-THUMB_PULL_SECONDS = 2
-
 
 # ── Source 1/2: extract from local mp4 ─────────────────────────────────────
 
@@ -72,91 +69,40 @@ async def extract_from_local(clip: Clip, paths: Paths) -> Path | None:
     return None
 
 
-# ── Source 3: short pull through the gateway ───────────────────────────────
+# ── Source 3: camera-native recording JPEG ─────────────────────────────────
 
 
 def make_camera_runner(clip: Clip, paths: Paths):
     async def runner(tapo: Any, _cancel: asyncio.Event) -> Path:
-        return await _short_pull(tapo, clip, paths)
+        return await _native_thumbnail(tapo, clip, paths)
 
     return runner
 
 
-async def _short_pull(tapo: Any, clip: Clip, paths: Paths) -> Path:
-    from pytapo.media_stream._utils import StreamType
-
+async def _native_thumbnail(tapo: Any, clip: Clip, paths: Paths) -> Path:
     out = paths.thumb(clip)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(".tmp.jpg")
-    if tmp.exists():
-        tmp.unlink()
-
-    pull_end = clip.start + THUMB_PULL_SECONDS
-    user_id = await get_user_id(tapo)
-    session = await open_session(tapo, StreamType.Download)
+    tmp.unlink(missing_ok=True)
+    thumbnail = RecordingThumbnail(tapo, clip.start, clip.end)
     try:
-        session.set_window_size(50)
-    except Exception:
-        pass
-
-    ffmpeg = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-y",
-        "-fflags", "+genpts+discardcorrupt",
-        "-f", "mpegts", "-i", "pipe:0",
-        "-map", "0:v:0", "-frames:v", "1",
-        "-vf", "scale=320:-2", "-q:v", "4",
-        str(tmp),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-
-    deadline = asyncio.get_event_loop().time() + THUMB_PULL_SECONDS * 3 + 15
-    bytes_video = 0
-    try:
-        await session.start()
-        req = build_playback_request(user_id, clip.start, pull_end)
-        try:
-            transceive_iter = session.transceive(req, "application/json", no_data_timeout=5)
-        except TypeError:
-            transceive_iter = session.transceive(req, "application/json")
-
-        async for raw in transceive_iter:
-            if asyncio.get_event_loop().time() > deadline:
-                break
-            r = normalize_response(raw)
-            if r.finished:
-                break
-            if r.plaintext:
-                try:
-                    ffmpeg.stdin.write(r.plaintext)
-                    bytes_video += len(r.plaintext)
-                    await ffmpeg.stdin.drain()
-                except (BrokenPipeError, ConnectionResetError):
-                    break
-    finally:
-        try:
-            ffmpeg.stdin.close()
-        except Exception:
-            pass
-        try:
-            await asyncio.wait_for(ffmpeg.wait(), timeout=10)
-        except asyncio.TimeoutError:
-            ffmpeg.kill()
-            await ffmpeg.wait()
-        try:
-            await session.close()
-        except Exception:
-            pass
+        await thumbnail.download(tmp, overwriteFiles=True)
+    except Exception as exc:
+        tmp.unlink(missing_ok=True)
+        raise ApiError(
+            Code.DOWNLOAD_EMPTY,
+            "camera returned no native recording thumbnail",
+            status=502,
+            context={"reason": str(exc)},
+        ) from exc
 
     if tmp.exists() and tmp.stat().st_size > 100:
         tmp.replace(out)
         return out
-    if tmp.exists():
-        tmp.unlink()
+    tmp.unlink(missing_ok=True)
     raise ApiError(
         Code.DOWNLOAD_EMPTY,
-        f"thumb pull produced no jpg (video_bytes={bytes_video})",
+        "camera returned an empty native recording thumbnail",
         status=502,
     )
 
@@ -169,12 +115,28 @@ class ThumbBackfill:
     can poll. Tries local extraction first; falls back to a camera pull
     through the supplied gateway. Failures retry once, then stick."""
 
-    def __init__(self, paths: Paths, gateway):
+    def __init__(self, paths: Paths, gateway, *, on_event=None):
         self.paths = paths
         self.gateway = gateway
         self._q: asyncio.Queue = asyncio.Queue()
         self._state: dict[str, dict] = {}
         self._task: asyncio.Task | None = None
+        self._on_event = on_event
+
+    def _emit(self, key: str) -> None:
+        """Push this clip's current thumb status (replaces the per-thumbnail
+        HEAD poll the frontend used to run)."""
+        if self._on_event is None:
+            return
+        st = self._state.get(key) or {}
+        self._on_event({
+            "type": "thumb",
+            "key": key,
+            "status": st.get("status"),
+            "error": st.get("error"),
+            "message": st.get("message"),
+            "attempt": st.get("attempts", 0),
+        })
 
     def state(self, key: str) -> dict | None:
         return self._state.get(key)
@@ -195,9 +157,11 @@ class ThumbBackfill:
             "status": "queued",
             "attempts": (existing or {}).get("attempts", 0),
             "error": None,
+            "message": "Waiting for camera access",
             "clip": clip,
         }
         self._q.put_nowait(clip)
+        self._emit(key)
         return "queued"
 
     def requeue(self, clip: Clip) -> None:
@@ -209,9 +173,11 @@ class ThumbBackfill:
             "status": "queued",
             "attempts": 0,
             "error": None,
+            "message": "Waiting for camera access",
             "clip": clip,
         }
         self._q.put_nowait(clip)
+        self._emit(key)
 
     def retry_failed_for_date(self, date: str) -> int:
         """Reset all failed thumbs for `date` back to the queue."""
@@ -224,6 +190,7 @@ class ThumbBackfill:
             st["status"] = "queued"
             st["attempts"] = 0
             st["error"] = None
+            st["message"] = "Waiting for camera access"
             self._q.put_nowait(st["clip"])
             n += 1
         return n
@@ -251,14 +218,20 @@ class ThumbBackfill:
                 # Cheap check: maybe the file appeared in the meantime.
                 if self.paths.thumb(clip).exists():
                     st["status"] = "ready"
+                    st["message"] = "Thumbnail already cached"
+                    self._emit(key)
                     continue
                 st["status"] = "running"
                 st["attempts"] += 1
+                st["message"] = "Retrieving the first frame only"
+                self._emit(key)
                 try:
                     local = await extract_from_local(clip, self.paths)
                     if local is not None:
                         st["status"] = "ready"
                         st["error"] = None
+                        st["message"] = "Thumbnail ready from local media"
+                        self._emit(key)
                         continue
                     await self.gateway.submit_thumb(
                         clip, make_camera_runner(clip, self.paths)
@@ -266,14 +239,18 @@ class ThumbBackfill:
                     if self.paths.thumb(clip).exists():
                         st["status"] = "ready"
                         st["error"] = None
+                        st["message"] = "Thumbnail ready"
                     else:
                         raise RuntimeError("camera pull returned no jpg")
                 except Exception as e:
                     st["error"] = f"{type(e).__name__}: {e}"
                     if st["attempts"] >= 2:
                         st["status"] = "failed"
+                        st["message"] = "Thumbnail failed"
                     else:
                         st["status"] = "queued"
+                        st["message"] = "Retrying thumbnail"
                         await self._q.put(clip)
+                self._emit(key)
         except asyncio.CancelledError:
             return

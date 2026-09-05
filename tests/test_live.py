@@ -97,16 +97,20 @@ async def test_hls_consumer_writes_playlist_when_fed_real_ts(tmp_path, make_av_t
     # Feed in 16KB chunks at near real-time-ish pace.
     for i in range(0, len(ts_bytes), 16 * 1024):
         await consumer.feed(ts_bytes[i:i + 16 * 1024])
-    # Give ffmpeg a beat to flush.
-    await asyncio.sleep(0.5)
-    await consumer.stopped()
-
+    # A pause flushes the current HLS window. The next generation must remove
+    # it rather than turning live view into accumulated playback.
+    await consumer.paused()
     playlist = consumer.playlist_path
     assert playlist.exists(), "HLS playlist not created"
     assert playlist.stat().st_size > 0
     segs = list(consumer.stream_dir.glob("seg_*.ts"))
     assert segs, "no HLS segments written"
     assert all(s.stat().st_size > 0 for s in segs)
+    await consumer.started()
+    assert not consumer.playlist_path.exists()
+    assert not list(consumer.stream_dir.glob("seg_*.ts")), "restart retained stale live segments"
+    await consumer.stopped()
+    assert not list(consumer.stream_dir.iterdir()), "stopped stream cache was not purged"
 
 
 async def test_detach_live_cleans_up():

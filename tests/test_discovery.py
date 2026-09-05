@@ -3,6 +3,8 @@ each helper is testable as a pure function over fake input."""
 
 from __future__ import annotations
 
+import pytest
+
 from srv.discovery import (
     ArpEntry,
     broadcast_for_subnet,
@@ -14,6 +16,8 @@ from srv.discovery import (
     looks_like_conn_error,
     normalize_mac,
     parse_nmap_grepable,
+    validate_subnet,
+    discover_candidates,
 )
 
 
@@ -31,6 +35,15 @@ def test_normalize_mac_passes_through_correct_form():
 def test_normalize_mac_handles_none():
     assert normalize_mac(None) is None
     assert normalize_mac("") is None
+
+
+@pytest.mark.parametrize("message", [
+    "Remote end closed connection without response",
+    "Connection aborted by peer",
+    "NewConnectionError: failed to establish a new connection",
+])
+def test_sleeping_camera_disconnects_are_connection_errors(message):
+    assert looks_like_conn_error(message)
 
 
 # ── arp helpers ────────────────────────────────────────────────────────────
@@ -78,6 +91,27 @@ def test_parse_nmap_grepable_picks_hosts_with_camera_port():
 def test_parse_nmap_grepable_empty_when_no_match():
     out = "Host: 10.1.1.5 ()\tPorts: 22/open/tcp//ssh///\n"
     assert parse_nmap_grepable(out) == []
+
+
+def test_validate_subnet_normalizes_host_address_and_rejects_unsafe_range():
+    assert validate_subnet("192.168.50.22/24") == "192.168.50.0/24"
+    with pytest.raises(ValueError):
+        validate_subnet("--script=bad")
+    with pytest.raises(ValueError):
+        validate_subnet("10.0.0.0/8")
+
+
+def test_discover_candidates_combines_port_scan_and_tapo_arp(monkeypatch):
+    monkeypatch.setattr("srv.discovery.run_nmap_scan", lambda subnet: ["192.168.1.20"])
+    monkeypatch.setattr("srv.discovery.read_arp_table", lambda: _rows(
+        ("192.168.1.20", "78:20:51:00:00:01"),
+        ("192.168.1.21", "5c:62:8b:00:00:02"),
+        ("10.0.0.8", "78:20:51:00:00:03"),
+    ))
+    assert discover_candidates("192.168.1.0/24") == [
+        {"ip": "192.168.1.20", "mac": "78:20:51:00:00:01", "source": "camera port 8800"},
+        {"ip": "192.168.1.21", "mac": "5c:62:8b:00:00:02", "source": "unverified Tapo device"},
+    ]
 
 
 # ── discover_ip orchestration ──────────────────────────────────────────────
@@ -171,3 +205,256 @@ def test_auth_error_recognises_tapo_codes():
     assert looks_like_auth_error("Invalid authentication: -40401")
     assert looks_like_auth_error("HTTP 401 Unauthorized")
     assert not looks_like_auth_error("connection refused")
+
+
+# ── MAC persistence (deep-sleep WoL survival) ──────────────────────────────
+# When the camera is deep-asleep its ARP/neigh entry is gone, so there is
+# nothing to auto-learn from — Wake-on-LAN only works if we kept the MAC the
+# camera reported while it was last awake. These lock that round-trip in.
+
+
+def test_remember_mac_persists_and_normalises(tmp_path):
+    from srv.config import Settings
+
+    s = Settings(host="10.1.1.143", password="x", cache_root=tmp_path)
+    s.remember_mac("78:20:51:1E:50:7A")  # camera reports uppercase
+    assert s.mac == "78:20:51:1e:50:7a"
+    assert s.mac_file().read_text().strip() == "78:20:51:1e:50:7a"
+
+
+def test_persisted_mac_survives_restart(tmp_path):
+    from srv.config import Settings
+
+    Settings(host="10.1.1.143", password="x", cache_root=tmp_path).remember_mac(
+        "78:20:51:1e:50:7a"
+    )
+    # Fresh process, no TAPO_MAC in the environment.
+    fresh = Settings(host="10.1.1.143", password="x", cache_root=tmp_path)
+    assert fresh.mac is None
+    fresh.load_persisted_mac()
+    assert fresh.mac == "78:20:51:1e:50:7a"
+    # And it's still a valid WoL target.
+    assert len(build_wol_packet(fresh.mac)) == 102
+
+
+def test_explicit_env_mac_wins_over_persisted(tmp_path):
+    from srv.config import Settings
+
+    (tmp_path / "camera.mac").write_text("78:20:51:1e:50:7a\n")
+    s = Settings(host="10.1.1.143", password="x", mac="AA:BB:CC:DD:EE:FF", cache_root=tmp_path)
+    s.load_persisted_mac()
+    assert s.mac == "AA:BB:CC:DD:EE:FF"
+
+
+def test_remember_mac_ignores_blank_and_zero(tmp_path):
+    from srv.config import Settings
+
+    s = Settings(host="10.1.1.143", password="x", cache_root=tmp_path)
+    s.remember_mac("")
+    s.remember_mac("00:00:00:00:00:00")
+    assert s.mac is None
+    assert not s.mac_file().exists()
+
+
+# ── IP persistence (DHCP lease wanders between sleeps) ──────────────────────
+
+
+def test_persisted_host_survives_restart_and_overrides_stale_env(tmp_path):
+    from srv.config import Settings
+
+    # Discovery moved us to a new lease while running.
+    live = Settings(host="10.1.1.143", password="x", cache_root=tmp_path)
+    live.remember_host("10.1.1.144")
+    assert live.host == "10.1.1.144"
+    assert live.host_file().read_text().strip() == "10.1.1.144"
+
+    # Restart: env still points at the old (now dead) address; the persisted
+    # last-known-good wins so we don't strand on it.
+    fresh = Settings(host="10.1.1.143", password="x", cache_root=tmp_path)
+    fresh.load_persisted_host()
+    assert fresh.host == "10.1.1.144"
+
+
+def test_load_persisted_host_noop_when_absent(tmp_path):
+    from srv.config import Settings
+
+    s = Settings(host="10.1.1.143", password="x", cache_root=tmp_path)
+    s.load_persisted_host()
+    assert s.host == "10.1.1.143"
+
+
+def test_camera_update_host_persists_new_ip(tmp_path):
+    from srv.camera import CameraConnection
+    from srv.config import Settings
+
+    s = Settings(host="10.1.1.143", password="x", cache_root=tmp_path)
+    cam = CameraConnection(s, tapo_factory=lambda _s: object())
+    assert cam.update_host("10.1.1.144") is True
+    assert s.host_file().read_text().strip() == "10.1.1.144"
+    # Unchanged IP is a no-op (no churn).
+    assert cam.update_host("10.1.1.144") is False
+
+
+# ── self-healing connect when the lease moved ("doesn't connect even awake") ─
+
+
+def test_camera_get_self_heals_on_connection_failure(tmp_path):
+    from srv.camera import CameraConnection
+    from srv.config import Settings
+
+    s = Settings(host="10.1.1.144", password="x", cache_root=tmp_path)
+    built: list[str] = []
+
+    def factory(settings):
+        # Camera isn't at the stale .144; it's reachable at .143.
+        if settings.host == "10.1.1.144":
+            raise ConnectionError("Max retries exceeded with url: /")
+        built.append(settings.host)
+        return object()
+
+    cam = CameraConnection(s, tapo_factory=factory, rediscover=lambda: "10.1.1.143")
+    assert cam.get() is not None
+    assert s.host == "10.1.1.143"
+    assert s.host_file().read_text().strip() == "10.1.1.143"
+    assert built == ["10.1.1.143"]
+
+
+def test_camera_get_reraises_when_rediscovery_finds_nothing(tmp_path):
+    from srv.camera import CameraConnection
+    from srv.config import Settings
+
+    s = Settings(host="10.1.1.144", password="x", cache_root=tmp_path)
+
+    def factory(settings):
+        raise ConnectionError("No route to host")
+
+    cam = CameraConnection(s, tapo_factory=factory, rediscover=lambda: None)
+    with pytest.raises(ConnectionError):
+        cam.get()
+
+
+def test_camera_get_sends_wol_to_mac_then_reconnects(tmp_path, monkeypatch):
+    """The doorbell sleeps and stops answering on the LAN. get() must send a
+    WoL magic packet to its MAC (what the mobile app does) and retry the
+    handshake until it wakes — NOT scan with nmap."""
+    import srv.camera as camera_mod
+    from srv.camera import CameraConnection
+    from srv.config import Settings
+
+    waks: list[str] = []
+    monkeypatch.setattr(camera_mod, "send_wol", lambda mac, subnet=None: waks.append(mac))
+    monkeypatch.setattr(camera_mod.time, "sleep", lambda _s: None)
+    # ARP can't see the asleep camera; the wake loop relies on retrying the host.
+    monkeypatch.setattr(camera_mod, "read_arp_table", lambda: [])
+
+    s = Settings(host="10.1.1.143", password="x", mac="78:20:51:1e:50:7a", cache_root=tmp_path)
+    calls = {"n": 0}
+
+    def factory(settings):
+        calls["n"] += 1
+        if calls["n"] < 3:  # asleep for the first two handshake attempts
+            raise ConnectionError("No route to host")
+        return object()  # woke up
+
+    cam = CameraConnection(s, tapo_factory=factory)
+    assert cam.get() is not None
+    assert waks == ["78:20:51:1e:50:7a"]  # WoL fired at the real MAC
+    assert calls["n"] == 3                 # retried the handshake until it woke
+
+
+def test_camera_get_wol_picks_up_new_dhcp_lease(tmp_path, monkeypatch):
+    """If the camera rejoins at a new DHCP address after waking, the wake loop
+    re-resolves the IP from its (stable) MAC via ARP and connects there."""
+    import srv.camera as camera_mod
+    from srv.camera import CameraConnection
+    from srv.config import Settings
+    from srv.discovery import ArpEntry
+
+    monkeypatch.setattr(camera_mod, "send_wol", lambda mac, subnet=None: None)
+    monkeypatch.setattr(camera_mod.time, "sleep", lambda _s: None)
+    # After WoL the camera shows up in ARP at a *different* address.
+    monkeypatch.setattr(
+        camera_mod, "read_arp_table",
+        lambda: [ArpEntry("10.1.1.150", "78:20:51:1e:50:7a")],
+    )
+
+    s = Settings(host="10.1.1.143", password="x", mac="78:20:51:1e:50:7a", cache_root=tmp_path)
+
+    def factory(settings):
+        if settings.host == "10.1.1.143":
+            raise ConnectionError("No route to host")  # old lease is dead
+        return object()
+
+    cam = CameraConnection(s, tapo_factory=factory)
+    assert cam.get() is not None
+    assert s.host == "10.1.1.150"
+    assert s.host_file().read_text().strip() == "10.1.1.150"
+
+
+def test_camera_with_retry_invalidates_stale_client_and_retries(tmp_path, monkeypatch):
+    """After the camera goes back to sleep, the cached client is stale and the
+    op fails mid-call. with_retry must drop it and rebuild (re-running the
+    wake path) so a single request recovers — not return 'offline'."""
+    import srv.camera as camera_mod
+    from srv.camera import CameraConnection
+    from srv.config import Settings
+
+    monkeypatch.setattr(camera_mod, "send_wol", lambda mac, subnet=None: None)
+    monkeypatch.setattr(camera_mod.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(camera_mod, "read_arp_table", lambda: [])
+
+    s = Settings(host="10.1.1.143", password="x", mac="78:20:51:1e:50:7a", cache_root=tmp_path)
+    clients: list[object] = []
+
+    def factory(settings):
+        c = object()
+        clients.append(c)
+        return c
+
+    cam = CameraConnection(s, tapo_factory=factory)
+    calls = {"n": 0}
+
+    def op(client):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("No route to host")  # stale client mid-call
+        return "ok"
+
+    assert cam.with_retry(op) == "ok"
+    assert calls["n"] == 2        # retried after invalidation
+    assert len(clients) == 2      # a fresh client was built for the retry
+
+
+def test_camera_with_retry_does_not_retry_non_conn_errors(tmp_path):
+    from srv.camera import CameraConnection
+    from srv.config import Settings
+
+    s = Settings(host="10.1.1.143", password="x", cache_root=tmp_path)
+    cam = CameraConnection(s, tapo_factory=lambda _s: object())
+    calls = {"n": 0}
+
+    def op(client):
+        calls["n"] += 1
+        raise ValueError("not a connection problem")
+
+    with pytest.raises(ValueError):
+        cam.with_retry(op)
+    assert calls["n"] == 1  # a logic error must not trigger a wake/retry
+
+
+def test_camera_get_does_not_rediscover_on_auth_error(tmp_path):
+    from srv.camera import CameraConnection
+    from srv.config import Settings
+
+    s = Settings(host="10.1.1.144", password="x", cache_root=tmp_path)
+    tried: list[int] = []
+
+    def factory(settings):
+        raise Exception("Invalid authentication: -40401")
+
+    cam = CameraConnection(
+        s, tapo_factory=factory, rediscover=lambda: tried.append(1) or "10.1.1.143"
+    )
+    with pytest.raises(Exception):
+        cam.get()
+    assert tried == []  # auth failures must not kick off an nmap sweep

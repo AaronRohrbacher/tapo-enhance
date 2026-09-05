@@ -15,18 +15,6 @@ from srv.thumbs import ThumbBackfill, extract_from_local, make_camera_runner
 CLIP = Clip("20990101", 1700000000, 1700000005)
 
 
-class FakeStreamType:
-    Download = "download"
-
-
-@pytest.fixture(autouse=True)
-def patch_stream_type(monkeypatch):
-    import sys, types
-    fake_mod = types.ModuleType("pytapo.media_stream._utils")
-    fake_mod.StreamType = FakeStreamType
-    monkeypatch.setitem(sys.modules, "pytapo.media_stream._utils", fake_mod)
-
-
 # ── local extraction ──────────────────────────────────────────────────────
 
 

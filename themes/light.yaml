@@ -1,0 +1,20 @@
+id: light
+name: Daylight
+colors:
+  bg: "#f4f7f5"
+  bg-elev: "#ffffff"
+  bg-elev-2: "#dfeae3"
+  fg: "#153b27"
+  fg-bright: "#092416"
+  fg-dim: "#49745c"
+  fg-faint: "#a2bbaa"
+  line: "#b9d0c0"
+  line-bright: "#3e8b5d"
+  primary: "#19733b"
+  primary-dim: "#2d8650"
+  green: "#19733b"
+  warn: "#b42332"
+  warn-glow: "rgba(180, 35, 50, 0.25)"
+  glow: "rgba(25, 115, 59, 0.12)"
+  glow-soft: "rgba(25, 115, 59, 0.07)"
+  select: "rgba(25, 115, 59, 0.15)"

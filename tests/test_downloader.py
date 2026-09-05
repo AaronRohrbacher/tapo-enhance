@@ -18,22 +18,6 @@ from srv.recordings import Clip, Paths
 CLIP = Clip("20990101", 1700000000, 1700000002)
 
 
-class FakeStreamType:
-    Download = "download"
-
-
-@pytest.fixture(autouse=True)
-def patch_stream_type(monkeypatch):
-    """downloader imports `from pytapo.media_stream._utils import StreamType` —
-    force a fake so tests don't depend on pytapo internals."""
-    import sys
-    import types
-
-    fake_mod = types.ModuleType("pytapo.media_stream._utils")
-    fake_mod.StreamType = FakeStreamType
-    monkeypatch.setitem(sys.modules, "pytapo.media_stream._utils", fake_mod)
-
-
 async def _run_via_gateway(tapo, clip, paths):
     g = CameraGateway(get_tapo=lambda: tapo)
     await g.start()

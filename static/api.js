@@ -24,26 +24,35 @@
     };
   }
 
-  async function get(url) {
+  async function request(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { ...options, signal: controller.signal });
       return await unpack(res);
     } catch (e) {
-      return { ok: false, code: "NETWORK", error: e.message, retryable: true };
+      const timedOut = e && e.name === "AbortError";
+      return {
+        ok: false,
+        code: timedOut ? "TIMEOUT" : "NETWORK",
+        error: timedOut ? "request timed out" : (e.message || "network request failed"),
+        retryable: true,
+      };
+    } finally {
+      clearTimeout(timer);
     }
   }
 
+  async function get(url) {
+    return request(url, {}, 45_000);
+  }
+
   async function post(url, body) {
-    try {
-      const res = await fetch(url, {
+    return request(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body || {}),
-      });
-      return await unpack(res);
-    } catch (e) {
-      return { ok: false, code: "NETWORK", error: e.message, retryable: true };
-    }
+      }, 10 * 60_000);
   }
 
   global.API = { get, post };

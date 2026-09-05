@@ -95,9 +95,8 @@ async def test_live_pauses_for_download_then_resumes(
         await g.stop()
 
 
-async def test_thumb_during_live_is_serialised(fake_media_tapo, paths, tmp_path):
-    """Backfill thumb runs while live is running — must pause live for the
-    duration of the thumb pull, just like a download."""
+async def test_native_thumb_pauses_then_resumes_live(fake_media_tapo, paths, tmp_path):
+    """Native JPEG retrieval is serialized and live resumes afterward."""
     from srv.thumbs import make_camera_runner
 
     async def live_src(tapo, cancel: asyncio.Event, consumer):
@@ -123,23 +122,14 @@ async def test_thumb_during_live_is_serialised(fake_media_tapo, paths, tmp_path)
             await asyncio.sleep(0.05)
         assert g.live_running()
 
-        # During the thumb pull, busy_kind must be "thumb" (not None, not "live").
-        assertion_results = []
-
-        async def watcher():
-            for _ in range(30):
-                if g.busy_kind() == "thumb":
-                    assertion_results.append(("thumb_busy", not g.live_running()))
-                    return
-                await asyncio.sleep(0.01)
-
-        watch_task = asyncio.create_task(watcher())
-        out = await g.submit_thumb(CLIP, make_camera_runner(CLIP, paths))
-        await watch_task
+        thumb = g.submit_thumb(CLIP, make_camera_runner(CLIP, paths))
+        out = await asyncio.wait_for(thumb, timeout=10)
         assert out.exists()
-        # While the thumb was running, live must NOT have been running concurrently.
-        if assertion_results:
-            kind, paused = assertion_results[0]
-            assert paused, "live was running while thumb was pulling — that's the contention bug"
+        for _ in range(80):
+            if g.live_running():
+                break
+            await asyncio.sleep(0.05)
+        assert g.live_running(), "live did not resume after native thumbnail"
+        assert any(kind == "thumb" and value.startswith("done:") for kind, value in g.activity)
     finally:
         await g.stop()

@@ -8,6 +8,7 @@ tests can monkeypatch them with deterministic fakes."""
 from __future__ import annotations
 
 import os
+import ipaddress
 import socket
 import subprocess
 from dataclasses import dataclass
@@ -22,13 +23,95 @@ class ArpEntry:
     mac: str  # lowercase, colon-delimited
 
 
+def validate_subnet(value: str) -> str:
+    """Normalize a bounded IPv4 LAN network suitable for an interactive scan."""
+    try:
+        network = ipaddress.ip_network(value.strip(), strict=False)
+    except ValueError as exc:
+        raise ValueError("enter a valid IPv4 subnet, for example 192.168.1.0/24") from exc
+    if network.version != 4 or network.prefixlen < 16:
+        raise ValueError("discovery is limited to IPv4 networks /16 or smaller")
+    return str(network)
+
+
+def local_subnets() -> list[str]:
+    """Return global IPv4 networks on the default-route interface."""
+    try:
+        route = subprocess.run(
+            ["ip", "route", "show", "default"], capture_output=True, text=True, timeout=5,
+        )
+        words = (route.stdout or "").split()
+        interface = words[words.index("dev") + 1]
+        addresses = subprocess.run(
+            ["ip", "-o", "-4", "addr", "show", "dev", interface, "scope", "global"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError, ValueError, IndexError):
+        return []
+    networks = []
+    for line in (addresses.stdout or "").splitlines():
+        fields = line.split()
+        if "inet" not in fields:
+            continue
+        try:
+            networks.append(validate_subnet(fields[fields.index("inet") + 1]))
+        except (ValueError, IndexError):
+            continue
+    return list(dict.fromkeys(networks))
+
+
+def discover_candidates(subnet: str) -> list[dict[str, str | None]]:
+    """Find every likely Tapo camera instead of silently choosing the first."""
+    network = validate_subnet(subnet)
+    rows = read_arp_table()
+    arp_by_ip = {row.ip: row.mac for row in rows}
+    hits = run_nmap_scan(network)
+    candidates: dict[str, dict[str, str | None]] = {}
+    for ip in hits:
+        candidates[ip] = {"ip": ip, "mac": arp_by_ip.get(ip), "source": "camera port 8800"}
+    for row in find_arp_by_oui(rows):
+        if ipaddress.ip_address(row.ip) in ipaddress.ip_network(network):
+            candidates.setdefault(
+                row.ip, {"ip": row.ip, "mac": row.mac, "source": "unverified Tapo device"}
+            )
+    return [candidates[ip] for ip in sorted(candidates, key=ipaddress.ip_address)]
+
+
 def normalize_mac(mac: str | None) -> str | None:
     if not mac:
         return None
     return mac.lower().replace("-", ":").strip()
 
 
+def _read_ip_neigh() -> list[ArpEntry]:
+    """Parse `ip neigh show`. Unlike /proc/net/arp, this keeps the MAC for
+    entries in the STALE/DELAY/PROBE states — which is exactly the state a
+    recently-idle camera is in. /proc/net/arp zeroes the MAC the moment an
+    entry stops being REACHABLE, so it loses the camera's address as soon as
+    the doorbell dozes off, leaving WoL with nothing to target."""
+    try:
+        proc = subprocess.run(
+            ["ip", "neigh", "show"], capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    out: list[ArpEntry] = []
+    for line in (proc.stdout or "").splitlines():
+        parts = line.split()
+        if "lladdr" not in parts:
+            continue  # FAILED / INCOMPLETE entries have no MAC
+        mac = parts[parts.index("lladdr") + 1].lower()
+        if mac and mac != "00:00:00:00:00:00":
+            out.append(ArpEntry(parts[0], mac))
+    return out
+
+
 def read_arp_table(path: str = "/proc/net/arp") -> list[ArpEntry]:
+    # Prefer `ip neigh` — it retains STALE entries' MACs (see _read_ip_neigh).
+    # Fall back to the legacy /proc/net/arp only if the `ip` tool is missing.
+    neigh = _read_ip_neigh()
+    if neigh:
+        return neigh
     try:
         with open(path) as f:
             next(f, None)  # header
@@ -189,6 +272,8 @@ _CONN_MARKERS = (
     "max retries", "no route to host", "connection refused",
     "timed out", "connection reset", "network is unreachable",
     "name or service not known", "httpsconnectionpool",
+    "remote end closed", "connection aborted", "newconnectionerror",
+    "failed to establish a new connection", "connection closed",
 )
 _AUTH_MARKERS = (
     "invalid authentication", "authentication failed", "401",

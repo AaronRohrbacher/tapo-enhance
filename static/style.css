@@ -353,6 +353,20 @@ input[type="date"] {
   font-size: 12px;
 }
 .info-row .label { color: var(--fg-dim); }
+.feature-controls { padding: 0 12px 12px; display: grid; gap: 5px; }
+.feature-row {
+  display: grid; grid-template-columns: minmax(150px, 1fr) 90px 110px;
+  align-items: center; gap: 10px; padding-top: 5px; border-top: 1px dashed var(--line);
+}
+.feature-row > :nth-child(2) { color: var(--fg-dim); }
+.error-text { color: var(--warn); }
+.setup-card { max-width: 760px; margin: 24px auto; padding: 12px; }
+.config-form { display: grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap: 12px; }
+.config-form label { display: grid; gap: 4px; color: var(--fg-dim); }
+.config-form input {
+  width: 100%; background: var(--bg); color: var(--fg-bright);
+  border: 1px solid var(--line); padding: 7px; font: inherit;
+}
 .log {
   padding: 10px 12px; background: var(--bg);
   max-height: 360px; overflow: auto; margin: 0;
@@ -392,3 +406,5 @@ input[type="date"] {
   .topbar { flex-wrap: wrap; }
   .meta { width: 100%; justify-content: flex-end; }
 }
+.discovery-results { display: grid; gap: .5rem; margin: .5rem 0; }
+.discovery-choice { text-align: left; width: 100%; }
