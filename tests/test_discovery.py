@@ -101,7 +101,7 @@ def test_validate_subnet_normalizes_host_address_and_rejects_unsafe_range():
         validate_subnet("10.0.0.0/8")
 
 
-def test_discover_candidates_combines_port_scan_and_tapo_arp(monkeypatch):
+def test_discover_candidates_lists_only_camera_port_hits(monkeypatch):
     monkeypatch.setattr("srv.discovery.run_nmap_scan", lambda subnet: ["192.168.1.20"])
     monkeypatch.setattr("srv.discovery.read_arp_table", lambda: _rows(
         ("192.168.1.20", "78:20:51:00:00:01"),
@@ -110,8 +110,15 @@ def test_discover_candidates_combines_port_scan_and_tapo_arp(monkeypatch):
     ))
     assert discover_candidates("192.168.1.0/24") == [
         {"ip": "192.168.1.20", "mac": "78:20:51:00:00:01", "source": "camera port 8800"},
-        {"ip": "192.168.1.21", "mac": "5c:62:8b:00:00:02", "source": "unverified Tapo device"},
     ]
+
+
+def test_discover_candidates_does_not_list_arp_only_tapo_device(monkeypatch):
+    monkeypatch.setattr("srv.discovery.run_nmap_scan", lambda subnet: [])
+    monkeypatch.setattr("srv.discovery.read_arp_table", lambda: _rows(
+        ("192.168.1.21", "5c:62:8b:00:00:02"),  # Tapo chime / non-camera
+    ))
+    assert discover_candidates("192.168.1.0/24") == []
 
 
 # ── discover_ip orchestration ──────────────────────────────────────────────

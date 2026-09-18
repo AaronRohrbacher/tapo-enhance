@@ -61,7 +61,13 @@ def local_subnets() -> list[str]:
 
 
 def discover_candidates(subnet: str) -> list[dict[str, str | None]]:
-    """Find every likely Tapo camera instead of silently choosing the first."""
+    """Find camera candidates using the camera/media service fingerprint.
+
+    A Tapo OUI is not sufficient to identify a camera: the D225 bundle also
+    puts its networked chime on the LAN, and the chime has a Tapo MAC too.
+    Keep ARP/OUI data for recovery and MAC enrichment, but do not turn an
+    ARP-only Tapo device into a camera candidate.
+    """
     network = validate_subnet(subnet)
     rows = read_arp_table()
     arp_by_ip = {row.ip: row.mac for row in rows}
@@ -69,11 +75,6 @@ def discover_candidates(subnet: str) -> list[dict[str, str | None]]:
     candidates: dict[str, dict[str, str | None]] = {}
     for ip in hits:
         candidates[ip] = {"ip": ip, "mac": arp_by_ip.get(ip), "source": "camera port 8800"}
-    for row in find_arp_by_oui(rows):
-        if ipaddress.ip_address(row.ip) in ipaddress.ip_network(network):
-            candidates.setdefault(
-                row.ip, {"ip": row.ip, "mac": row.mac, "source": "unverified Tapo device"}
-            )
     return [candidates[ip] for ip in sorted(candidates, key=ipaddress.ip_address)]
 
 
