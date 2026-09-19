@@ -23,6 +23,11 @@ class Settings:
     app_port: int = 8000
     cache_root: Path = field(default_factory=lambda: Path(__file__).parent.parent / "cache")
     key_root: Path | None = None
+    dvr_enabled: bool = False
+    dvr_retention_days: int | None = None
+    dvr_keep_forever: bool = False
+    dvr_interval_minutes: int = 1440
+    dvr_daily_time: str = "00:10"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -50,7 +55,11 @@ class Settings:
         if not self.vault_exists():
             return
         payload = decrypt(self.vault_file().read_bytes(), load_or_create_key(self.key_file()))
-        for name in ("host", "user", "password", "cloud_password", "subnet", "child_id"):
+        for name in (
+            "host", "user", "password", "cloud_password", "subnet", "child_id",
+            "dvr_enabled", "dvr_retention_days", "dvr_keep_forever",
+            "dvr_interval_minutes", "dvr_daily_time",
+        ):
             if name in payload:
                 setattr(self, name, payload[name])
 
@@ -61,10 +70,35 @@ class Settings:
         payload = {
             "host": host, "user": user, "password": password,
             "cloud_password": cloud_password, "subnet": subnet,
+            "dvr_enabled": self.dvr_enabled,
+            "dvr_retention_days": self.dvr_retention_days,
+            "dvr_keep_forever": self.dvr_keep_forever,
+            "dvr_interval_minutes": self.dvr_interval_minutes,
+            "dvr_daily_time": self.dvr_daily_time,
         }
         write(self.vault_file(), payload, load_or_create_key(self.key_file()))
         self.host, self.user, self.password = host, user, password
         self.cloud_password, self.subnet = cloud_password, subnet
+
+    def save_dvr_config(
+        self, *, enabled: bool, retention_days: int, keep_forever: bool,
+        interval_minutes: int, daily_time: str,
+    ) -> None:
+        """Update the encrypted vault without exposing camera credentials."""
+        payload = {
+            "host": self.host, "user": self.user, "password": self.password,
+            "cloud_password": self.cloud_password, "subnet": self.subnet,
+            "dvr_enabled": enabled, "dvr_retention_days": retention_days,
+            "dvr_keep_forever": keep_forever,
+            "dvr_interval_minutes": interval_minutes,
+            "dvr_daily_time": daily_time,
+        }
+        write(self.vault_file(), payload, load_or_create_key(self.key_file()))
+        self.dvr_enabled = enabled
+        self.dvr_retention_days = retention_days
+        self.dvr_keep_forever = keep_forever
+        self.dvr_interval_minutes = interval_minutes
+        self.dvr_daily_time = daily_time
 
     def vault_exists(self) -> bool:
         return self.vault_file().is_file()

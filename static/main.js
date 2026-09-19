@@ -36,7 +36,10 @@
     if (tab !== "live" && (state.live.status !== "idle" || state.gateway.liveAttached)) {
       stopLive({ sound: false });
     }
-    if (tab === "settings" && !state.features) loadFeatures();
+    if (tab === "settings") {
+      if (!state.features) loadFeatures();
+      loadDvr();
+    }
   });
 
   async function loadThemes() {
@@ -76,7 +79,12 @@
     form.elements.user.value = r.data.user || "admin";
     form.elements.subnet.value = r.data.configured ? (r.data.subnet || "") : "";
     form.elements.password.value = "";
+    form.dataset.initialSetup = String(!r.data.configured);
     form.elements.mac.value = "";
+    $("#setup-camera-step").classList.remove("hidden");
+    $("#setup-dvr-step").classList.add("hidden");
+    form.querySelector('[type="submit"]').textContent = "connect camera";
+    $("#btn-config-cancel").classList.toggle("hidden", !r.data.configured);
     showSetup(show || !r.data.configured);
     if (!r.data.configured && !initialDiscoveryStarted) {
       initialDiscoveryStarted = true;
@@ -84,6 +92,64 @@
     }
     return r.data.configured;
   }
+
+  function applyDvr(data) {
+    const days = data.retention_days || 1;
+    const form = $("#dvr-settings-form");
+    form.elements.enabled.checked = !!data.enabled;
+    form.elements.retention_days.value = days;
+    form.elements.retention.value = data.keep_forever ? "forever" : "delete";
+    form.elements.interval_minutes.value = String(data.interval_minutes || 1440);
+    form.elements.daily_time.value = data.daily_time || "00:10";
+    form.dataset.originalDays = String(days);
+    form.dataset.originalKeep = String(!!data.keep_forever);
+    toggleDvrFields(form);
+    toggleDailyTime(form);
+    const camera = data.camera_history_error
+      ? `Camera history unavailable: ${data.camera_history_error}.`
+      : data.camera_available_days
+        ? `Camera: ${data.camera_available_days}-day span, oldest ${formatCameraDate(data.camera_oldest_date)}.`
+        : "Camera: no recording history found.";
+    const local = data.available_days
+      ? `Local: ${data.available_days} day${data.available_days === 1 ? "" : "s"} containing video, ${data.local_files} clip${data.local_files === 1 ? "" : "s"}.`
+      : "Local: no downloaded video yet.";
+    $("#dvr-availability").textContent = `${camera} ${local}`;
+    const syncButton = $("#btn-dvr-sync");
+    if (syncButton) {
+      const wasSyncing = syncButton.dataset.syncing === "true";
+      syncButton.disabled = !!data.syncing || !data.enabled;
+      syncButton.dataset.syncing = String(!!data.syncing);
+      if (data.syncing) $("#dvr-status").textContent = "syncing missing videos…";
+      else if (wasSyncing) $("#dvr-status").textContent = data.last_error ? `sync failed: ${data.last_error}` : "sync complete";
+    }
+  }
+
+  async function loadDvr() {
+    const r = await API.get("/api/dvr");
+    if (r.ok) applyDvr(r.data);
+    else $("#dvr-availability").textContent = "DVR status unavailable: " + r.error;
+    return r;
+  }
+
+  function toggleDvrFields(form) {
+    form.querySelector(".dvr-dependent").disabled = !form.elements.enabled.checked;
+  }
+
+  function toggleDailyTime(form) {
+    form.querySelector(".daily-time").classList.toggle(
+      "hidden", form.elements.interval_minutes.value !== "1440"
+    );
+  }
+
+  function formatCameraDate(value) {
+    if (!value || value.length !== 8) return "unknown";
+    return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+  }
+
+  [$("#setup-dvr-form"), $("#dvr-settings-form")].forEach((form) => {
+    form.elements.enabled.addEventListener("change", () => toggleDvrFields(form));
+    form.elements.interval_minutes.addEventListener("change", () => toggleDailyTime(form));
+  });
 
   // clock
   const clock = $("#clock");
@@ -143,6 +209,7 @@
       if (evt.type === "gateway") applyGateway(evt);
       else if (evt.type === "thumb") applyThumb(evt);
       else if (evt.type === "operation") applyOperation(evt);
+      else if (evt.type === "dvr") applyDvr(evt);
     };
     es.onerror = () => {
       state.events = { status: "reconnecting", error: "Progress connection lost; reconnecting" };
@@ -165,6 +232,9 @@
       const card = $(`.clip-card[data-key="${CSS.escape(evt.key)}"]`);
       const meta = card && card.querySelector(".meta-dur");
       if (meta) meta.textContent = message;
+    } else if (evt.operation === "dvr") {
+      $("#dvr-status").textContent = `sync: ${message}`;
+      if (evt.phase === "error") toast("DVR sync: " + (evt.error || message), "error");
     } else if (evt.operation === "live") {
       if (evt.phase === "error") {
         state.live.status = "error";
@@ -746,7 +816,7 @@
     const progress = $("#config-progress");
     const submit = form.querySelector('[type="submit"]');
     submit.disabled = true;
-    progress.textContent = "waking camera and trying compatible local login methods…";
+    progress.textContent = "waking camera and reading available history…";
     const r = await API.post("/api/config", {
       host: form.elements.host.value.trim(), user: form.elements.user.value.trim(),
       password: form.elements.password.value, subnet: form.elements.subnet.value.trim(),
@@ -754,12 +824,95 @@
     });
     form.elements.password.value = "";
     submit.disabled = false;
+    if (!r.ok) {
+      progress.textContent = "failed: " + r.error;
+      toast(r.error, "error");
+      return;
+    }
+    if (form.dataset.initialSetup !== "true") {
+      progress.textContent = `connected as ${r.data.user} — credentials encrypted`;
+      showSetup(false);
+      await loadStatus();
+      state.features = null;
+      return;
+    }
+    const dvrForm = $("#setup-dvr-form");
+    const defaultDays = Math.max(1, Number(r.data.camera_available_days) || 1);
+    dvrForm.elements.enabled.checked = true;
+    dvrForm.elements.retention_days.value = defaultDays;
+    dvrForm.elements.retention.value = "delete";
+    dvrForm.elements.interval_minutes.value = "1440";
+    dvrForm.elements.daily_time.value = "00:10";
+    toggleDvrFields(dvrForm);
+    toggleDailyTime(dvrForm);
+    $("#setup-camera-history").textContent = r.data.history_error
+      ? "Camera connected, but its recording history could not be read. The one-day value can be changed, or reconnect to retry."
+      : r.data.camera_available_days
+        ? `Camera history starts ${formatCameraDate(r.data.camera_oldest_date)} — a ${r.data.camera_available_days}-day span through today. This is the default below.`
+        : "The camera currently reports no recorded videos. DVR will retain the selected window as new videos arrive.";
+    $("#setup-camera-step").classList.add("hidden");
+    $("#setup-dvr-step").classList.remove("hidden");
+    $("#setup-dvr-step").focus();
+  });
+
+  $("#setup-dvr-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const submit = form.querySelector('[type="submit"]');
+    const progress = $("#setup-dvr-progress");
+    submit.disabled = true;
+    progress.textContent = "saving…";
+    const r = await API.post("/api/dvr", {
+      enabled: form.elements.enabled.checked,
+      retention_days: form.elements.retention_days.value || 1,
+      keep_forever: form.elements.retention.value === "forever",
+      interval_minutes: form.elements.interval_minutes.value,
+      daily_time: form.elements.daily_time.value || "00:10",
+    });
+    submit.disabled = false;
     if (!r.ok) { progress.textContent = "failed: " + r.error; toast(r.error, "error"); return; }
-    form.elements.user.value = r.data.user;
-    progress.textContent = `connected as ${r.data.user} — credentials encrypted`;
+    progress.textContent = "saved";
     showSetup(false);
     await loadStatus();
-    state.features = null;
+    loadLocal();
+  });
+
+  $("#dvr-settings-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const status = $("#dvr-status");
+    const keepForever = form.elements.retention.value === "forever";
+    const days = Number(form.elements.retention_days.value);
+    const reducingRetention = !keepForever && (
+      form.dataset.originalKeep === "true" || days < Number(form.dataset.originalDays || days)
+    );
+    if (reducingRetention && !confirm("This can delete local video copies outside the new history window. Videos on the camera will not be deleted. Continue?")) return;
+    status.textContent = "saving…";
+    const r = await API.post("/api/dvr", {
+      enabled: form.elements.enabled.checked,
+      retention_days: form.elements.retention_days.value || 1,
+      keep_forever: keepForever,
+      interval_minutes: form.elements.interval_minutes.value,
+      daily_time: form.elements.daily_time.value || "00:10",
+    });
+    status.textContent = r.ok ? "saved" : "failed: " + r.error;
+    if (r.ok) { applyDvr(r.data); toast("DVR settings saved", "success"); }
+    else toast(r.error, "error");
+  });
+  $("#btn-dvr-sync").addEventListener("click", async () => {
+    const button = $("#btn-dvr-sync");
+    const status = $("#dvr-status");
+    button.disabled = true;
+    status.textContent = "requesting sync…";
+    const r = await API.post("/api/dvr/sync", {});
+    if (!r.ok) {
+      button.disabled = false;
+      status.textContent = "sync failed: " + r.error;
+      toast(r.error, "error");
+      return;
+    }
+    status.textContent = r.data.message;
+    toast(r.data.message, "success");
   });
   $("#btn-reconnect").addEventListener("click", async () => {
     const r = await API.post("/api/camera/reconnect");

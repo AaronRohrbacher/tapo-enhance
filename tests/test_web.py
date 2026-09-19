@@ -5,6 +5,7 @@ responses match what the frontend expects."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -40,10 +41,40 @@ def test_index_has_name_and_favicon(client):
     assert icon.headers["content-type"].startswith("image/svg+xml")
 
 
+def test_dvr_setup_is_separate_and_settings_are_in_settings_tab(client):
+    c, _ = client
+    page = c.get("/").text
+    assert 'id="setup-camera-step"' in page
+    assert 'id="setup-dvr-step"' in page
+    assert 'id="setup-dvr-form"' in page
+    assert page.index('id="tab-settings"') < page.index('id="dvr-settings-form"')
+    assert "12:10am" in page
+    assert page.count('name="interval_minutes"') == 2
+    assert ">Sync now<" in page
+
+
+def test_dvr_schedule_settings_and_manual_sync_validation(client):
+    c, _ = client
+    saved = c.post("/api/dvr", json={
+        "enabled": False, "retention_days": 14, "keep_forever": True,
+        "interval_minutes": 360, "daily_time": "00:10",
+    })
+    assert saved.status_code == 200
+    assert saved.json()["interval_minutes"] == 360
+    assert saved.json()["keep_forever"] is True
+    invalid = c.post("/api/dvr", json={
+        "enabled": False, "retention_days": 14, "keep_forever": False,
+        "interval_minutes": 7, "daily_time": "bad",
+    })
+    assert invalid.status_code == 400
+    assert c.post("/api/dvr/sync").status_code == 400
+
+
 def test_app_metadata_has_single_source_version(client):
     c, _ = client
-    assert c.get("/api/app").json()["version"] == "1.0b"
-    assert "v1.0b" in c.get("/").text
+    version = (Path(__file__).parent.parent / "VERSION").read_text().strip()
+    assert c.get("/api/app").json()["version"] == version
+    assert f"v{version}" in c.get("/").text
 
 
 def test_themes_endpoint_returns_yaml_themes(client):
@@ -111,6 +142,8 @@ def test_web_configuration_encrypts_and_never_returns_password(tmp_path, fake_me
             "subnet": "10.0.0.0/24", "mac": "78:20:51:aa:bb:cc",
         })
         assert saved.status_code == 200
+        assert saved.json()["camera_oldest_date"] == "20260424"
+        assert saved.json()["camera_available_days"] >= 1
         after = c.get("/api/config").json()
         assert "password" not in after
         assert "password_set" not in after

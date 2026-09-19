@@ -9,6 +9,8 @@ RUN python -m venv /opt/venv \
 
 FROM python:3.13-slim
 
+ARG APP_VERSION=""
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg nmap iproute2 curl tini gosu \
     && rm -rf /var/lib/apt/lists/* \
@@ -18,7 +20,10 @@ ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     TAPO_CACHE_ROOT=/data \
     APP_HOST=0.0.0.0 \
-    APP_PORT=8000
+    APP_PORT=8000 \
+    APP_VERSION=${APP_VERSION}
+
+LABEL org.opencontainers.image.version=${APP_VERSION}
 
 COPY --from=build /opt/venv /opt/venv
 WORKDIR /app

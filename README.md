@@ -1,7 +1,8 @@
 # Tapo Enhance
 
-Current release: **1.0b (beta)**. The running version appears in the header and
-at `GET /api/app`; both come from the same server-side version source.
+The release version lives in [`VERSION`](VERSION). Release images receive that
+version at build time; the same value appears in the UI header and at
+`GET /api/app`.
 
 **A local-first web interface for viewing and downloading recordings from a
 Tapo camera you own.**
@@ -104,6 +105,19 @@ route and scans it for Tapo camera candidates. A single result fills the camera
 address automatically; multiple results are shown for explicit selection. The
 subnet and address remain editable for segmented networks or unusual routing.
 
+### DVR Mode
+
+DVR Mode is available during first-run setup and later under **Settings**. It
+automatically downloads the camera's recording history, then checks on a
+user-selected interval. The default is 12:10am server time each day for the
+previous day's recordings; Settings also provides **Sync now**. The default
+history length is the number of days from the
+oldest recording currently available through today. A longer history is valid:
+the app keeps checking and retains that many days as recordings become
+available. Retention deletes only local copies; it never deletes recordings on
+the camera. Initial setup shows the camera's available history; Settings shows
+both camera history and the number of local dates containing downloaded video.
+
 ## Docker Compose
 
 Compose is the recommended way to build and run Tapo Enhance:
@@ -137,6 +151,24 @@ Publishing a GitHub Release triggers `.github/workflows/container.yml`, which
 builds the application with the companion API fork and publishes release and
 `latest` tags to GitHub Container Registry.
 
+### Releasing a public image
+
+1. Run `./scripts/deploy.py`. It proposes the next simple `major.minor`
+   version (`0.1` for the first run) and updates `VERSION`. Use `--dry-run` to
+   exercise the prompt without changing the file.
+2. Review and commit the release changes.
+3. Create and publish a GitHub Release whose tag is exactly `v` plus the
+   `VERSION` value (for example, `v0.1`).
+4. The container workflow publishes both
+   `ghcr.io/aaronrohrbacher/tapo-enhance:<version>` and `:latest`, embedding the
+   same version in the image and UI.
+5. On the package page in GitHub, open **Package settings → Change visibility**
+   and select **Public**. GHCR visibility is account/package state and cannot be
+   guaranteed by repository code alone.
+
+The workflow also supports manual dispatch, which publishes only the immutable
+`VERSION` tag. Release publishing is intentionally left to a repository owner.
+
 ## Themes
 
 Themes are YAML files, so comments are supported. The built-ins are Phosphor
@@ -164,7 +196,7 @@ All generated data lives below `cache/` and is ignored by Git:
 
 | Directory | Purpose | Retention |
 | --- | --- | --- |
-| `cache/recordings/` | Events explicitly downloaded by the user | Kept until purged |
+| `cache/recordings/` | User downloads and DVR copies | DVR retention, or kept until purged |
 | `cache/thumbs/` | Native event JPEGs | Cached until purged |
 | `cache/playback/` | Temporary HLS for archive viewing | Replaceable cache |
 | `cache/stream/` | Rolling live HLS window | Bounded while live; removed on stop |

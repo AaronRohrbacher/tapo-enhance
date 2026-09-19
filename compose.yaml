@@ -2,7 +2,9 @@ services:
   tapo-enhance:
     build:
       context: .
-    image: ${TAPO_ENHANCE_IMAGE:-ghcr.io/aaronrohrbacher/tapo-enhance:latest}
+      args:
+        APP_VERSION: ${TAPO_ENHANCE_VERSION:-}
+    image: ${TAPO_ENHANCE_IMAGE:-ghcr.io/aaronrohrbacher/tapo-enhance}:${TAPO_ENHANCE_VERSION:-latest}
     pull_policy: missing
     network_mode: host
     cap_add:

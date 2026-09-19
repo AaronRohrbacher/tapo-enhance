@@ -367,6 +367,16 @@ input[type="date"] {
   width: 100%; background: var(--bg); color: var(--fg-bright);
   border: 1px solid var(--line); padding: 7px; font: inherit;
 }
+.config-form .muted { grid-column: 1 / -1; }
+.check-label { display: flex !important; grid-template-columns: none !important; align-items: center; gap: 7px !important; }
+.check-label input { width: auto; }
+.card-copy { padding: 0 12px; }
+.dvr-config-form { display: grid; gap: 12px; padding: 0 12px 12px; }
+.dvr-config-form fieldset { display: grid; gap: 10px; margin: 0; padding: 12px; border: 1px solid var(--line); }
+.dvr-config-form legend { color: var(--fg-dim); padding: 0 5px; }
+.dvr-config-form fieldset > label:not(.check-label) { display: grid; gap: 4px; color: var(--fg-dim); max-width: 280px; }
+.dvr-config-form input[type="number"], .dvr-config-form input[type="time"], .dvr-config-form select { width: 100%; background: var(--bg); color: var(--fg-bright); border: 1px solid var(--line); padding: 7px; font: inherit; }
+#setup-dvr-step > p { padding: 0 12px; }
 .log {
   padding: 10px 12px; background: var(--bg);
   max-height: 360px; overflow: auto; margin: 0;
@@ -405,6 +415,7 @@ input[type="date"] {
 @media (max-width: 720px) {
   .topbar { flex-wrap: wrap; }
   .meta { width: 100%; justify-content: flex-end; }
+  .config-form { grid-template-columns: 1fr; }
 }
 .discovery-results { display: grid; gap: .5rem; margin: .5rem 0; }
 .discovery-choice { text-align: left; width: 100%; }

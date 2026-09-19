@@ -47,6 +47,7 @@ from .playback import playlist_url
 from .recordings import Clip, Paths
 from .thumbs import ThumbBackfill, extract_from_local
 from . import themes as themes_mod
+from .dvr import ALLOWED_INTERVALS, DvrService, days_between
 from .version import __version__
 
 
@@ -133,17 +134,23 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
     )
     backfill = ThumbBackfill(paths, gateway, on_event=hub.emit)
     jobs = JobRegistry(paths, gateway)
+    dvr = DvrService(
+        settings, paths, camera.with_retry, gateway, on_event=hub.emit,
+    )
     hls_consumer = HlsConsumer(paths.stream, on_event=hub.emit)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         await gateway.start()
         backfill.start()
+        if settings.dvr_enabled:
+            dvr.start()
         try:
             yield
         finally:
             await gateway.detach_live()
             await backfill.stop()
+            await dvr.stop()
             await gateway.stop()
 
     root = Path(__file__).parent.parent
@@ -160,6 +167,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
     app.state.jobs = jobs
     app.state.hls = hls_consumer
     app.state.hub = hub
+    app.state.dvr = dvr
 
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -215,6 +223,64 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
             "vault_exists": settings.vault_exists(),
         }
 
+    @app.get("/api/dvr")
+    async def dvr_status():
+        camera_history_error = None
+        if settings.configured():
+            try:
+                dates = await _to_thread(
+                    camera.with_retry,
+                    lambda t: rec_mod.parse_dates(t.getRecordingsList()),
+                )
+                dvr._camera_oldest = min(dates) if dates else None
+            except Exception as exc:
+                dvr._last_error = f"{type(exc).__name__}: {exc}"
+                camera_history_error = str(exc) or type(exc).__name__
+        result = dvr.config()
+        if result["retention_days"] is None:
+            result["retention_days"] = max(1, result["camera_available_days"])
+        return {"ok": True, **result, "camera_history_error": camera_history_error}
+
+    @app.post("/api/dvr")
+    async def configure_dvr(req: Request):
+        body = await req.json()
+        enabled = body.get("enabled", False)
+        keep_forever = body.get("keep_forever", False)
+        interval = body.get("interval_minutes", 1440)
+        daily_time = str(body.get("daily_time") or "00:10")
+        days = body.get("retention_days")
+        if not isinstance(enabled, bool) or not isinstance(keep_forever, bool):
+            raise ApiError(Code.BAD_REQUEST, "DVR settings have invalid values", status=400)
+        try:
+            retention_days = int(days)
+        except (TypeError, ValueError):
+            raise ApiError(Code.BAD_REQUEST, "DVR history must be at least 1 day", status=400)
+        if not 1 <= retention_days <= 36500:
+            raise ApiError(Code.BAD_REQUEST, "DVR history must be between 1 and 36500 days", status=400)
+        try:
+            interval_minutes = int(interval)
+            datetime.strptime(daily_time, "%H:%M")
+        except (TypeError, ValueError):
+            raise ApiError(Code.BAD_REQUEST, "DVR schedule is invalid", status=400)
+        if interval_minutes not in ALLOWED_INTERVALS:
+            raise ApiError(Code.BAD_REQUEST, "unsupported DVR check interval", status=400)
+        try:
+            return {"ok": True, **await dvr.configure(
+                enabled=enabled, retention_days=retention_days,
+                keep_forever=keep_forever, interval_minutes=interval_minutes,
+                daily_time=daily_time,
+            )}
+        except OSError as exc:
+            raise ApiError(Code.INTERNAL, "DVR settings could not be saved", status=500) from exc
+
+    @app.post("/api/dvr/sync")
+    async def sync_dvr_now():
+        if not settings.dvr_enabled:
+            raise ApiError(Code.BAD_REQUEST, "enable DVR Mode before syncing", status=400)
+        started = dvr.trigger_sync()
+        return {"ok": True, "started": started,
+                "message": "sync started" if started else "sync already running"}
+
     @app.get("/api/discovery")
     async def discover(subnet: str = ""):
         try:
@@ -266,6 +332,18 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
             camera.invalidate()
             try:
                 basic = await _to_thread(camera.with_retry, lambda t: t.getBasicInfo())
+                history_error = None
+                try:
+                    dates = await _to_thread(
+                        camera.with_retry,
+                        lambda t: rec_mod.parse_dates(t.getRecordingsList()),
+                    )
+                    camera_oldest = min(dates) if dates else None
+                    camera_days = days_between(camera_oldest)
+                    dvr._camera_oldest = camera_oldest
+                except Exception as exc:
+                    camera_oldest, camera_days = None, 0
+                    history_error = f"{type(exc).__name__}: {exc}"
                 try:
                     settings.save_camera_config(
                         host=host, user=candidate_user, password=password,
@@ -281,6 +359,9 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
                     "ok": True, "configured": True, "host": settings.host,
                     "user": candidate_user,
                     "alias": _nested(basic, "device_info", "basic_info", "device_alias", default="camera"),
+                    "camera_oldest_date": camera_oldest,
+                    "camera_available_days": camera_days,
+                    "history_error": history_error,
                 }
             except Exception as exc:
                 last_error = exc

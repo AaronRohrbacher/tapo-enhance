@@ -15,11 +15,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - name: Verify release version
-        if: github.event_name == 'release'
+      - name: Resolve version
+        id: version
+        shell: bash
         run: |
-          VERSION=$(python -c "from srv.version import __version__; print(__version__)")
-          test "${GITHUB_REF_NAME#v}" = "$VERSION"
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          test -n "$VERSION"
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            RELEASE_VERSION="${GITHUB_REF_NAME#v}"
+            test "$RELEASE_VERSION" = "$VERSION"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -30,12 +36,14 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=ref,event=tag
+            type=raw,value=${{ steps.version.outputs.version }}
             type=raw,value=latest,enable=${{ github.event_name == 'release' }}
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

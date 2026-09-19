@@ -35,24 +35,53 @@
   <main>
 
     <section id="setup-panel" class="card setup-card hidden">
-      <div class="card-header">configure camera</div>
-      <p class="muted">Credentials are encrypted immediately and are never persisted as plaintext.</p>
-      <form id="camera-config-form" class="config-form">
-        <input name="mac" type="hidden">
-        <label>camera address<input name="host" required placeholder="select a discovered camera or enter its IP"></label>
-        <label>camera user or Tapo email<input name="user" value="admin" required autocomplete="username"></label>
-        <label>camera/Tapo password<input name="password" type="password" required autocomplete="current-password"></label>
-        <p class="muted">For a battery-mode D225 with Camera Account disabled, use your Tapo account password. The app will try the compatible <code>admin</code> login automatically and use the same password for local media encryption.</p>
-        <label>LAN subnet<input name="subnet" placeholder="automatic, or 192.168.1.0/24"></label>
-        <div class="row">
-          <button type="button" id="btn-discover" class="btn">scan LAN for cameras</button>
-          <span id="discovery-progress" class="muted"></span>
-        </div>
-        <div id="discovery-results" class="discovery-results hidden"></div>
-        <button type="submit" class="btn primary">save and connect</button>
-        <button type="button" id="btn-config-cancel" class="btn">cancel</button>
-        <span id="config-progress" class="muted"></span>
-      </form>
+      <div id="setup-camera-step">
+        <div class="card-header">1 · connect camera</div>
+        <p class="muted">Connect first so Tapo Enhance can read the camera’s available recording history. Credentials are encrypted immediately and never stored as plaintext.</p>
+        <form id="camera-config-form" class="config-form">
+          <input name="mac" type="hidden">
+          <label>camera address<input name="host" required placeholder="select a discovered camera or enter its IP"></label>
+          <label>camera user or Tapo email<input name="user" value="admin" required autocomplete="username"></label>
+          <label>camera/Tapo password<input name="password" type="password" required autocomplete="current-password"></label>
+          <p class="muted">For a battery-mode D225 with Camera Account disabled, use your Tapo account password. The app will try the compatible <code>admin</code> login automatically and use the same password for local media encryption.</p>
+          <label>LAN subnet<input name="subnet" placeholder="automatic, or 192.168.1.0/24"></label>
+          <div class="row">
+            <button type="button" id="btn-discover" class="btn">scan LAN for cameras</button>
+            <span id="discovery-progress" class="muted" role="status" aria-live="polite"></span>
+          </div>
+          <div id="discovery-results" class="discovery-results hidden"></div>
+          <button type="submit" class="btn primary">connect camera</button>
+          <button type="button" id="btn-config-cancel" class="btn">cancel</button>
+          <span id="config-progress" class="muted" role="status" aria-live="polite"></span>
+        </form>
+      </div>
+      <div id="setup-dvr-step" class="hidden" tabindex="-1">
+        <div class="card-header">2 · DVR Mode</div>
+        <p>DVR Mode downloads the selected camera history, then checks for new videos on the schedule you choose. The default is daily at 12:10am server time.</p>
+        <p class="muted">It never deletes videos from the camera. Local copies can follow the history window or be kept permanently.</p>
+        <p id="setup-camera-history" class="status-line"></p>
+        <form id="setup-dvr-form" class="dvr-config-form">
+          <label class="check-label"><input name="enabled" type="checkbox" checked> enable DVR Mode</label>
+          <fieldset class="dvr-dependent">
+            <legend>history and local retention</legend>
+            <label>days to download from camera<input name="retention_days" type="number" min="1" max="36500" required></label>
+            <label>check for new videos
+              <select name="interval_minutes">
+                <option value="15">every 15 minutes</option><option value="30">every 30 minutes</option>
+                <option value="60">every hour</option><option value="360">every 6 hours</option>
+                <option value="720">every 12 hours</option><option value="1440" selected>daily</option>
+              </select>
+            </label>
+            <label class="daily-time">daily check time (server time)<input name="daily_time" type="time" value="00:10" required></label>
+            <label class="check-label"><input name="retention" type="radio" value="delete" checked> delete local copies older than this number of days</label>
+            <label class="check-label"><input name="retention" type="radio" value="forever"> keep local copies permanently</label>
+          </fieldset>
+          <div class="row">
+            <button type="submit" class="btn primary">finish setup</button>
+            <span id="setup-dvr-progress" class="muted" role="status" aria-live="polite"></span>
+          </div>
+        </form>
+      </div>
     </section>
 
     <!-- LIVE -->
@@ -141,6 +170,30 @@
           <button id="btn-reboot" class="btn warn">reboot</button>
           <button id="btn-configure" class="btn">configure another camera</button>
         </div>
+      </div>
+      <div class="card">
+        <div class="card-header">DVR Mode</div>
+        <p class="card-copy">Automatically download camera history, then check for new videos on the schedule you choose. The default is daily at 12:10am server time.</p>
+        <p class="muted card-copy">This only manages local copies. Videos on the camera are never deleted.</p>
+        <form id="dvr-settings-form" class="dvr-config-form">
+          <label class="check-label"><input name="enabled" type="checkbox"> enable DVR Mode</label>
+          <fieldset class="dvr-dependent">
+            <legend>history and local retention</legend>
+            <label>days to download from camera<input name="retention_days" type="number" min="1" max="36500" required></label>
+            <label>check for new videos
+              <select name="interval_minutes">
+                <option value="15">every 15 minutes</option><option value="30">every 30 minutes</option>
+                <option value="60">every hour</option><option value="360">every 6 hours</option>
+                <option value="720">every 12 hours</option><option value="1440">daily</option>
+              </select>
+            </label>
+            <label class="daily-time">daily check time (server time)<input name="daily_time" type="time" required></label>
+            <label class="check-label"><input name="retention" type="radio" value="delete"> delete local copies older than this number of days</label>
+            <label class="check-label"><input name="retention" type="radio" value="forever"> keep local copies permanently</label>
+          </fieldset>
+          <div id="dvr-availability" class="status-line muted">open Settings to load DVR status.</div>
+          <div class="row"><button type="submit" class="btn primary">save DVR settings</button><button type="button" id="btn-dvr-sync" class="btn">Sync now</button><span id="dvr-status" class="muted" role="status" aria-live="polite"></span></div>
+        </form>
       </div>
       <div class="card">
         <div class="card-header">
