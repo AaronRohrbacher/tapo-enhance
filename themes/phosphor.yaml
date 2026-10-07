@@ -1,6 +1,6 @@
 # Tapo Enhance's original theme. Copy this file to create your own.
 id: phosphor
-name: Phosphor (default)
+name: The Matrix (default)
 colors:
   bg: "#000300"
   bg-elev: "#021004"

@@ -159,12 +159,19 @@ def list_local(paths: Paths) -> list[dict]:
             if f.suffix != ".mp4":
                 continue
             try:
+                start, end = (int(part) for part in f.stem.split("_", 1))
+            except (TypeError, ValueError):
+                continue
+            try:
                 size = f.stat().st_size
             except OSError:
                 continue
             out.append(
                 {
                     "date": date_dir.name,
+                    "startTime": start,
+                    "endTime": end,
+                    "key": f"{date_dir.name}/{start}/{end}",
                     "file": f.name,
                     "path": f"/recordings/{date_dir.name}/{f.name}",
                     "size_mb": round(size / 1024 / 1024, 1),

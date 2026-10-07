@@ -77,6 +77,37 @@ async def test_already_cached_short_circuits(fake_media_tapo, paths, make_av_mp4
     assert len(fake_media_tapo.sessions) == 0
 
 
+async def test_corrupt_cached_copy_is_atomically_replaced(
+    fake_media_tapo, paths, ffprobe_streams,
+):
+    cached = paths.recording(CLIP)
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    corrupt = b"not an mp4" * 200
+    cached.write_bytes(corrupt)
+
+    out = await _run_via_gateway(fake_media_tapo, CLIP, paths)
+
+    assert out == cached
+    assert cached.read_bytes() != corrupt
+    assert any(s["codec_type"] == "video" for s in ffprobe_streams(cached))
+    assert len(fake_media_tapo.sessions) == 1
+
+
+async def test_archive_download_does_not_reject_container_duration_rounding(
+    fake_media_tapo, paths, monkeypatch,
+):
+    """The output-side ffmpeg limit is authoritative for archive and DVR."""
+    import srv.downloader as downloader
+
+    async def inflated_container_duration(_path):
+        return CLIP.duration + 2.0, True
+
+    monkeypatch.setattr(downloader, "_probe", inflated_container_duration)
+    out = await _run_via_gateway(fake_media_tapo, CLIP, paths)
+    assert out.exists()
+    assert out.stat().st_size > 1024
+
+
 async def test_empty_pull_raises_structured_error(fake_tapo, paths, monkeypatch):
     """If the camera produces no bytes, the user gets a clean DOWNLOAD_EMPTY
     error — not a silent zero-byte file in their archive."""

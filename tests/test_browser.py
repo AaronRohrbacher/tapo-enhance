@@ -1,6 +1,6 @@
 """Playwright integration test. Spawns uvicorn against FakeTapo, then a
 real browser drives the app: load page, browse archive, click a clip,
-confirm download succeeds and surfaces in the local list. Catches the
+confirm download succeeds and remains marked in Archive. Catches the
 class of bug where unit tests pass but the JS doesn't actually wire to
 the route.
 
@@ -97,6 +97,30 @@ def test_settings_loads_feature_dashboard_and_reconfiguration_form(page, fake_se
 
 
 @pytest.mark.browser
+def test_dvr_window_displays_server_setting_and_updates_after_save(page, fake_server):
+    page.goto(fake_server, timeout=10_000)
+    page.wait_for_function("() => document.querySelector('#dvr-window').textContent.includes('7 days')")
+    page.click("button[data-tab='settings']")
+    page.check("#dvr-settings-form input[name='enabled']")
+    page.fill("#dvr-settings-form input[name='retention_days']", "12")
+    page.click("#dvr-settings-form button[type='submit']")
+    page.wait_for_function("() => document.querySelector('#dvr-window').textContent.includes('12 days')")
+    assert page.input_value("#dvr-settings-form input[name='retention_days']") == "12"
+
+
+@pytest.mark.browser
+def test_cache_labels_explain_temporary_playback_storage(page, fake_server):
+    page.goto(fake_server, timeout=10_000)
+    page.click("button[data-tab='archive']")
+    page.wait_for_function("() => document.querySelector('#cache-rows').textContent.includes('undownloaded-recording HLS files')")
+    text = page.text_content("#cache-rows")
+    assert "Local DVR MP4s; playback uses these files directly." in text
+    assert "Browser-playable MP4 copies fetched from the camera without adding them to the downloaded DVR archive." in text
+    assert "HLS playlists and two-second video segments generated while watching a camera recording that has not been downloaded." in text
+    assert "Temporary HLS segments used by the Live tab." in text
+
+
+@pytest.mark.browser
 def test_first_run_automatically_discovers_and_selects_camera(page, fake_server):
     page.route("**/api/config", lambda route: route.fulfill(
         status=200, content_type="application/json",
@@ -143,7 +167,7 @@ def test_archive_loads_clips_for_a_date(page, fake_server):
 
 
 @pytest.mark.browser
-def test_events_stream_pushes_gateway_snapshot(fake_server):
+def test_events_stream_pushes_gateway_and_cache_snapshots(fake_server):
     """The SSE push channel must open and immediately deliver a gateway
     snapshot. Read against the real uvicorn server (ASGI test transports
     can't stream an infinite body)."""
@@ -155,12 +179,17 @@ def test_events_stream_pushes_gateway_snapshot(fake_server):
         assert resp.headers.get("content-type", "").startswith("text/event-stream")
         resp.fp.raw._sock.settimeout(5)  # bound the readline
         line = resp.readline()
+        resp.readline()  # blank SSE separator
+        cache_line = resp.readline()
     finally:
         resp.close()
     assert line.startswith(b"data:"), line
     evt = json.loads(line[len(b"data:"):])
     assert evt["type"] == "gateway"
     assert set(evt) >= {"busy", "queued", "liveAttached", "liveRunning"}
+    cache_evt = json.loads(cache_line[len(b"data:"):])
+    assert cache_evt["type"] == "cache"
+    assert set(cache_evt["usage"]) >= {"recordings", "thumbs", "total_bytes"}
 
 
 @pytest.mark.browser
@@ -195,9 +224,11 @@ def test_no_polling_and_thumb_status_pushed_over_sse(page, fake_server):
     thumb_heads = [u for (m, u) in reqs if m == "HEAD" and "/api/thumb/" in u]
     events = [u for (m, u) in reqs if "/api/events" in u]
     thumb_all = [u for (m, u) in reqs if "/api/thumb/" in u]
+    cache_usage = [u for (m, u) in reqs if "/api/cache/usage" in u]
 
     assert gw == [], f"gateway/status must never be polled; saw {len(gw)}"
     assert thumb_heads == [], f"thumbnails must not be HEAD-polled; saw {len(thumb_heads)}"
+    assert cache_usage == [], f"cache usage must be pushed, not polled; saw {len(cache_usage)}"
     assert len(events) >= 1, "the SSE event stream was never opened"
     # Bounded by status transitions (≈3 per clip × 2 clips), NOT by a timer ×
     # elapsed seconds — the old loop would have fired ~15+ HEADs in this window.
@@ -226,13 +257,26 @@ def test_download_button_surfaces_a_result_toast(page, fake_server):
     page.wait_for_selector("#toast:not(.hidden)", timeout=15_000)
     cls = page.get_attribute("#toast", "class") or ""
     assert "success" in cls or "error" in cls
+    if "success" in cls:
+        page.reload(timeout=10_000)
+        page.click("button[data-tab='archive']")
+        page.fill("#arch-date", "2026-04-26")
+        page.click("#btn-arch-load")
+        page.wait_for_selector(".clip-card.downloaded", timeout=5_000)
+        assert page.text_content(".clip-card.downloaded .local-badge") == "DOWNLOADED ✓"
+        assert "downloaded" in (page.text_content(".clip-card.downloaded .meta-dur") or "")
+        page.click(".clip-card.downloaded button[data-action='watch']")
+        page.wait_for_function(
+            "() => document.querySelector('#player-video').src.includes('/recordings/')",
+            timeout=5_000,
+        )
 
 
 @pytest.mark.browser
 def test_purge_thumbs_works_through_ui(page, fake_server):
     page.goto(fake_server, timeout=10_000)
     page.wait_for_selector(".dot.connected", timeout=5_000)
-    page.click("button[data-tab='local']")
+    page.click("button[data-tab='archive']")
     page.on("dialog", lambda d: d.accept())
     page.click("button[data-cache='thumbs']")
     page.wait_for_selector("#toast:not(.hidden)", timeout=5_000)

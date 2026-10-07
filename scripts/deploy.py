@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Prepare a release version without performing Git or deployment actions."""
-
 from __future__ import annotations
 
 import argparse

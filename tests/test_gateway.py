@@ -141,6 +141,32 @@ async def test_duplicate_submissions_dedup_to_one_runner(gw):
     assert runs == 1
 
 
+async def test_interactive_work_jumps_ahead_of_dvr_backfill(gw):
+    sequence: list[str] = []
+    started = asyncio.Event()
+    gate = asyncio.Event()
+
+    async def blocker(_t, _c):
+        started.set()
+        await gate.wait()
+        sequence.append("blocker")
+
+    def labelled(name):
+        async def runner(_t, _c):
+            sequence.append(name)
+        return runner
+
+    first = gw.submit_dvr_download(A, blocker)
+    await started.wait()
+    background = gw.submit_dvr_download(B, labelled("dvr"))
+    thumb = gw.submit_thumb(C, labelled("thumb"))
+    interactive = gw.submit_download(Clip("20260101", 7, 8), labelled("download"))
+    query = gw.submit_query("status", labelled("query"))
+    gate.set()
+    await asyncio.gather(first, background, thumb, interactive, query)
+    assert sequence == ["blocker", "download", "query", "thumb", "dvr"]
+
+
 async def test_runner_exception_propagates_without_breaking_the_queue(gw):
     async def boom(_t, _c):
         raise RuntimeError("camera died")
@@ -172,6 +198,58 @@ async def test_user_cancelled_playback_does_not_stop_gateway(gw):
         return "still running"
 
     assert await gw.submit_download(B, ok) == "still running"
+
+
+async def test_disabling_dvr_releases_camera_for_browsing_and_playback(gw):
+    started = asyncio.Event()
+    queued_ran = False
+
+    async def active(_t, cancel):
+        started.set()
+        await cancel.wait()
+        raise asyncio.CancelledError
+
+    async def queued(_t, _cancel):
+        nonlocal queued_ran
+        queued_ran = True
+
+    first = gw.submit_dvr_download(A, active)
+    await started.wait()
+    second = gw.submit_dvr_download(B, queued)
+    waits = gw.cancel_dvr()
+    await asyncio.gather(*waits)
+    assert first.cancelled() and second.cancelled()
+    assert not queued_ran
+
+    async def available(_t, _cancel):
+        return "available"
+
+    assert await gw.submit_query("show-date", available) == "available"
+    assert await gw.submit_playback(C, available) == "available"
+
+
+async def test_shutdown_during_user_cancellation_finishes_queued_waiters():
+    g = CameraGateway(get_tapo=_fake_get_tapo)
+    await g.start()
+    cleaning = asyncio.Event()
+    started = asyncio.Event()
+
+    async def runner(_t, cancel):
+        started.set()
+        await cancel.wait()
+        cleaning.set()
+        await asyncio.Event().wait()
+
+    active = g.submit_dvr_download(A, runner)
+    await asyncio.wait_for(started.wait(), 1)
+    queued = g.submit_dvr_download(B, runner)
+    cleanup = g.cancel_dvr()
+    await asyncio.wait_for(cleaning.wait(), 1)
+    await asyncio.wait_for(g.stop(), 1)
+    await asyncio.wait_for(asyncio.gather(*cleanup), 1)
+    for future in (active, queued):
+        if not future.cancelled():
+            assert isinstance(future.exception(), RuntimeError)
 
 
 async def test_get_tapo_failure_propagates_to_future(gw):
@@ -241,6 +319,80 @@ async def test_attach_without_live_source_raises():
         with pytest.raises(RuntimeError, match="live_source"):
             g.attach_live(FakeConsumer())
     finally:
+        await g.stop()
+
+
+async def test_live_stop_racing_queue_submission_keeps_worker_alive():
+    started = asyncio.Event()
+    closing = asyncio.Event()
+    release = asyncio.Event()
+
+    async def live(_t, cancel, _consumer):
+        started.set()
+        await cancel.wait()
+        closing.set()
+        await release.wait()
+        raise asyncio.CancelledError
+
+    g = CameraGateway(get_tapo=_fake_get_tapo, live_source=live)
+    await g.start()
+    g.attach_live(FakeConsumer())
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        detach = asyncio.create_task(g.detach_live())
+        await asyncio.wait_for(closing.wait(), 1)
+
+        async def query(_t, _c):
+            return "recordings available"
+
+        first = g.submit_query("dates", query)
+        second = g.submit_query("show-date", query)
+        await asyncio.sleep(0.01)
+        release.set()
+        await asyncio.wait_for(detach, 1)
+        assert await asyncio.wait_for(asyncio.gather(first, second), 1) == [
+            "recordings available", "recordings available",
+        ]
+        assert not g._task.done()
+        assert g.queued_count() == 0
+    finally:
+        release.set()
+        await g.stop()
+
+
+async def test_live_cleanup_is_not_cancelled_twice_before_next_job():
+    started = asyncio.Event()
+    closing = asyncio.Event()
+    release_close = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def source(_t, cancel, consumer):
+        started.set()
+        try:
+            await cancel.wait()
+        finally:
+            closing.set()
+            await release_close.wait()
+            closed.set()
+
+    g = CameraGateway(get_tapo=_fake_get_tapo, live_source=source)
+    await g.start()
+    g.attach_live(FakeConsumer())
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+
+        async def runner(_t, _c):
+            assert closed.is_set(), "camera reopened before live socket closed"
+            return "ok"
+
+        future = g.submit_download(A, runner)
+        await asyncio.wait_for(closing.wait(), 1)
+        await asyncio.sleep(0.02)
+        assert not future.done()
+        release_close.set()
+        assert await asyncio.wait_for(future, 1) == "ok"
+    finally:
+        release_close.set()
         await g.stop()
 
 

@@ -8,6 +8,7 @@ tests can monkeypatch them with deterministic fakes."""
 from __future__ import annotations
 
 import os
+import errno
 import ipaddress
 import socket
 import subprocess
@@ -69,9 +70,18 @@ def discover_candidates(subnet: str) -> list[dict[str, str | None]]:
     ARP-only Tapo device into a camera candidate.
     """
     network = validate_subnet(subnet)
+    hits: list[str] = []
+    # Battery cameras can wake between probes and intermittently omit the
+    # first response. Retry the model-neutral camera service scan; never turn
+    # a generic Tapo MAC into a result.
+    for _attempt in range(3):
+        hits = run_nmap_scan(network)
+        if hits:
+            break
+    # Read neighbours after nmap: the scan itself populates ARP for hosts that
+    # were not already in the kernel's neighbour cache.
     rows = read_arp_table()
     arp_by_ip = {row.ip: row.mac for row in rows}
-    hits = run_nmap_scan(network)
     candidates: dict[str, dict[str, str | None]] = {}
     for ip in hits:
         candidates[ip] = {"ip": ip, "mac": arp_by_ip.get(ip), "source": "camera port 8800"}
@@ -174,7 +184,9 @@ def run_nmap_scan(subnet: str, *, timeout: int = 60) -> list[str]:
     try:
         proc = subprocess.run(
             [
-                "nmap", "-p", "8800", "-n", "--open",
+                # Do not depend on ping/host-discovery responses. Battery
+                # cameras can reject discovery probes while port 8800 answers.
+                "nmap", "-Pn", "-p", "8800", "-n", "--open",
                 "--max-retries", "1", "--host-timeout", "8s",
                 "-oG", "-", subnet,
             ],
@@ -283,6 +295,16 @@ _AUTH_MARKERS = (
 
 
 def looks_like_conn_error(exc: BaseException | str) -> bool:
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    if isinstance(exc, OSError) and exc.errno in {
+        errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ECONNREFUSED,
+        errno.ECONNRESET, errno.ECONNABORTED, errno.ETIMEDOUT,
+    }:
+        return True
+    if isinstance(exc, BaseException) and exc.__cause__ is not None:
+        if looks_like_conn_error(exc.__cause__):
+            return True
     msg = str(exc).lower()
     return any(m in msg for m in _CONN_MARKERS)
 

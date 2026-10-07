@@ -110,12 +110,16 @@ subnet and address remain editable for segmented networks or unusual routing.
 DVR Mode is available during first-run setup and later under **Settings**. It
 automatically downloads the camera's recording history, then checks on a
 user-selected interval. The default is 12:10am server time each day for the
-previous day's recordings; Settings also provides **Sync now**. The default
+previous day's recordings. **Archive** shows sync status and provides **Sync
+now**; locally downloaded camera clips carry a persistent **LOCAL** indicator,
+including clips downloaded by DVR Mode. Local clips are validated and played
+from disk without opening another camera media session. A corrupt cached copy
+is retrieved again and atomically replaced. The default
 history length is the number of days from the
 oldest recording currently available through today. A longer history is valid:
 the app keeps checking and retains that many days as recordings become
 available. Retention deletes only local copies; it never deletes recordings on
-the camera. Initial setup shows the camera's available history; Settings shows
+the camera. Initial setup shows the camera's available history; Archive shows
 both camera history and the number of local dates containing downloaded video.
 
 ## Docker Compose

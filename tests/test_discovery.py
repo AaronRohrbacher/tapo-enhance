@@ -16,6 +16,7 @@ from srv.discovery import (
     looks_like_conn_error,
     normalize_mac,
     parse_nmap_grepable,
+    run_nmap_scan,
     validate_subnet,
     discover_candidates,
 )
@@ -113,12 +114,39 @@ def test_discover_candidates_lists_only_camera_port_hits(monkeypatch):
     ]
 
 
+def test_nmap_scan_does_not_require_host_discovery(monkeypatch):
+    seen = {}
+
+    def run(command, **_kwargs):
+        seen["command"] = command
+        return type("Result", (), {
+            "stdout": "Host: 192.168.1.20 ()\tPorts: 8800/open/tcp//unknown///\n"
+        })()
+
+    monkeypatch.setattr("srv.discovery.subprocess.run", run)
+    assert run_nmap_scan("192.168.1.0/24") == ["192.168.1.20"]
+    assert "-Pn" in seen["command"]
+
+
 def test_discover_candidates_does_not_list_arp_only_tapo_device(monkeypatch):
     monkeypatch.setattr("srv.discovery.run_nmap_scan", lambda subnet: [])
     monkeypatch.setattr("srv.discovery.read_arp_table", lambda: _rows(
         ("192.168.1.21", "5c:62:8b:00:00:02"),  # Tapo chime / non-camera
     ))
     assert discover_candidates("192.168.1.0/24") == []
+
+
+def test_discover_candidates_retries_intermittent_camera_service(monkeypatch):
+    scans = iter([[], [], ["192.168.1.20"]])
+    monkeypatch.setattr("srv.discovery.run_nmap_scan", lambda _subnet: next(scans))
+    monkeypatch.setattr("srv.discovery.read_arp_table", lambda: _rows(
+        ("192.168.1.20", "78:20:51:00:00:01"),
+        ("192.168.1.21", "78:20:51:00:00:02"),
+    ))
+    assert discover_candidates("192.168.1.0/24") == [{
+        "ip": "192.168.1.20", "mac": "78:20:51:00:00:01",
+        "source": "camera port 8800",
+    }]
 
 
 # ── discover_ip orchestration ──────────────────────────────────────────────
@@ -202,6 +230,11 @@ def test_broadcast_falls_back_on_garbage():
 
 
 def test_conn_error_recognises_common_python_messages():
+    assert looks_like_conn_error(TimeoutError())
+    assert looks_like_conn_error(OSError(113, "Connect call failed"))
+    wrapped = RuntimeError("camera stopped sending playback data")
+    wrapped.__cause__ = TimeoutError()
+    assert looks_like_conn_error(wrapped)
     assert looks_like_conn_error("Max retries exceeded with url:")
     assert looks_like_conn_error("No route to host")
     assert looks_like_conn_error(ConnectionResetError("Connection reset by peer"))

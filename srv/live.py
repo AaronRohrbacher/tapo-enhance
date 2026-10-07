@@ -21,6 +21,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .media import media_wait
+
 log = logging.getLogger(__name__)
 
 
@@ -212,14 +214,19 @@ async def camera_live_source(tapo: Any, cancel: asyncio.Event, consumer) -> None
 
     preview = PreviewStream(tapo, quality="HD", no_data_timeout=10)
     try:
-        await preview.start()
-        async for response in preview.responses():
+        await media_wait(preview.start(), cancel, timeout=15)
+        responses = preview.responses().__aiter__()
+        while True:
             if cancel.is_set():
                 break
+            try:
+                response = await media_wait(responses.__anext__(), cancel, timeout=15)
+            except StopAsyncIteration:
+                break
             if response.plaintext:
-                await consumer.feed(response.plaintext)
+                await media_wait(consumer.feed(response.plaintext), cancel, timeout=10)
     finally:
         try:
-            await preview.close()
+            await asyncio.wait_for(preview.close(), timeout=5)
         except Exception:
             pass

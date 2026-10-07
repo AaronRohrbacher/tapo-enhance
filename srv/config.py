@@ -24,7 +24,7 @@ class Settings:
     cache_root: Path = field(default_factory=lambda: Path(__file__).parent.parent / "cache")
     key_root: Path | None = None
     dvr_enabled: bool = False
-    dvr_retention_days: int | None = None
+    dvr_retention_days: int = 7
     dvr_keep_forever: bool = False
     dvr_interval_minutes: int = 1440
     dvr_daily_time: str = "00:10"
@@ -61,6 +61,8 @@ class Settings:
             "dvr_interval_minutes", "dvr_daily_time",
         ):
             if name in payload:
+                if name == "dvr_retention_days" and payload[name] is None:
+                    continue
                 setattr(self, name, payload[name])
 
     def save_camera_config(

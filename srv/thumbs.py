@@ -26,6 +26,7 @@ from typing import Any
 from pytapo.media_stream.recording_thumbnail import RecordingThumbnail
 
 from .errors import ApiError, Code
+from .media import media_wait
 from .recordings import Clip, Paths
 
 log = logging.getLogger(__name__)
@@ -74,19 +75,19 @@ async def extract_from_local(clip: Clip, paths: Paths) -> Path | None:
 
 def make_camera_runner(clip: Clip, paths: Paths):
     async def runner(tapo: Any, _cancel: asyncio.Event) -> Path:
-        return await _native_thumbnail(tapo, clip, paths)
+        return await _native_thumbnail(tapo, clip, paths, _cancel)
 
     return runner
 
 
-async def _native_thumbnail(tapo: Any, clip: Clip, paths: Paths) -> Path:
+async def _native_thumbnail(tapo: Any, clip: Clip, paths: Paths, cancel: asyncio.Event) -> Path:
     out = paths.thumb(clip)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(".tmp.jpg")
     tmp.unlink(missing_ok=True)
     thumbnail = RecordingThumbnail(tapo, clip.start, clip.end)
     try:
-        await thumbnail.download(tmp, overwriteFiles=True)
+        await media_wait(thumbnail.download(tmp, overwriteFiles=True), cancel, timeout=20)
     except Exception as exc:
         tmp.unlink(missing_ok=True)
         raise ApiError(

@@ -18,8 +18,7 @@
     </div>
     <nav class="tabs">
       <button class="tab active" data-tab="live">live</button>
-      <button class="tab" data-tab="archive">archive</button>
-      <button class="tab" data-tab="local">local</button>
+      <button class="tab" data-tab="archive">recordings</button>
       <button class="tab" data-tab="settings">settings</button>
     </nav>
     <div class="meta">
@@ -73,6 +72,8 @@
               </select>
             </label>
             <label class="daily-time">daily check time (server time)<input name="daily_time" type="time" value="00:10" required></label>
+            <label class="check-label"><input name="initial_sync" type="radio" value="now" checked> sync existing camera history now</label>
+            <label class="check-label"><input name="initial_sync" type="radio" value="later"> wait until the next scheduled interval</label>
             <label class="check-label"><input name="retention" type="radio" value="delete" checked> delete local copies older than this number of days</label>
             <label class="check-label"><input name="retention" type="radio" value="forever"> keep local copies permanently</label>
           </fieldset>
@@ -110,13 +111,36 @@
 
     <!-- ARCHIVE -->
     <section id="tab-archive" class="tab-content">
+      <div class="card dvr-sync-card">
+        <div class="card-header">
+          <span>automatic downloads (DVR)</span>
+          <button type="button" id="btn-dvr-sync" class="btn primary">Check and download now</button>
+        </div>
+        <div id="dvr-status" class="dvr-sync-status" role="status" aria-live="polite">loading sync status…</div>
+        <div id="dvr-progress-wrap" class="dvr-overall-progress hidden" role="progressbar" aria-label="DVR download progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div class="progress"><div id="dvr-progress-fill" class="fill"></div></div>
+          <div id="dvr-progress-detail" class="status-line muted"></div>
+        </div>
+        <div id="dvr-schedule" class="status-line muted"></div>
+        <div id="dvr-window" class="status-line">Sync window: loading…</div>
+        <div id="dvr-availability" class="status-line muted">checking downloaded recordings…</div>
+      </div>
+      <div id="dvr-conversion-card" class="card dvr-conversion-card hidden">
+        <div class="card-header">video conversion</div>
+        <div id="dvr-conversion-status" class="dvr-sync-status" role="status" aria-live="polite">waiting for downloads…</div>
+        <div id="dvr-conversion-progress" class="dvr-overall-progress" role="progressbar" aria-label="Video conversion progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div class="progress"><div id="dvr-conversion-fill" class="fill"></div></div>
+          <div id="dvr-conversion-detail" class="status-line muted"></div>
+        </div>
+      </div>
       <div class="card">
-        <div class="card-header">archive (sd card)</div>
+        <div class="card-header">camera recordings and manual downloads</div>
+        <p class="card-copy">There is one downloaded-recordings library. DVR adds missing recordings automatically; the Download buttons below add recordings manually to that same library.</p>
         <div class="row">
           <input type="date" id="arch-date">
-          <button id="btn-arch-load" class="btn primary">load date</button>
-          <button id="btn-arch-dates" class="btn">list dates</button>
-          <button id="btn-arch-all" class="btn">load all (30d)</button>
+          <button id="btn-arch-load" class="btn primary">show date</button>
+          <button id="btn-arch-dates" class="btn">show available dates</button>
+          <button id="btn-arch-all" class="btn">show last 30 days</button>
           <span class="grow"></span>
           <button id="btn-arch-select-all" class="btn" disabled>select all</button>
           <button id="btn-arch-bulk" class="btn" disabled>download selected</button>
@@ -136,23 +160,15 @@
         <video id="player-video" controls playsinline></video>
         <div id="player-status" class="status-line muted"></div>
       </div>
-    </section>
-
-    <!-- LOCAL -->
-    <section id="tab-local" class="tab-content">
-      <div class="card">
-        <div class="card-header">downloaded clips</div>
-        <div id="local-list" class="local-list"></div>
-      </div>
       <div class="card">
         <div class="card-header">cache</div>
         <div id="cache-rows" class="cache-rows"></div>
         <div class="row">
-          <button class="btn" data-cache="thumbs">purge thumbs</button>
-          <button class="btn" data-cache="previews">purge previews</button>
-          <button class="btn" data-cache="playback">purge playback</button>
-          <button class="btn" data-cache="stream">purge stream</button>
-          <button class="btn warn" data-cache="recordings">purge recordings</button>
+          <button class="btn" data-cache="thumbs">purge thumbnails</button>
+          <button class="btn" data-cache="previews">purge temporary recording MP4s</button>
+          <button class="btn" data-cache="playback">purge undownloaded-recording HLS files</button>
+          <button class="btn" data-cache="stream">purge live-view buffer</button>
+          <button class="btn warn" data-cache="recordings">purge downloaded recordings</button>
           <button class="btn warn" data-cache="all">purge all</button>
         </div>
       </div>
@@ -188,11 +204,12 @@
               </select>
             </label>
             <label class="daily-time">daily check time (server time)<input name="daily_time" type="time" required></label>
+            <label class="check-label"><input name="initial_sync" type="radio" value="now" checked> sync missing camera history after saving</label>
+            <label class="check-label"><input name="initial_sync" type="radio" value="later"> wait until the next scheduled interval</label>
             <label class="check-label"><input name="retention" type="radio" value="delete"> delete local copies older than this number of days</label>
             <label class="check-label"><input name="retention" type="radio" value="forever"> keep local copies permanently</label>
           </fieldset>
-          <div id="dvr-availability" class="status-line muted">open Settings to load DVR status.</div>
-          <div class="row"><button type="submit" class="btn primary">save DVR settings</button><button type="button" id="btn-dvr-sync" class="btn">Sync now</button><span id="dvr-status" class="muted" role="status" aria-live="polite"></span></div>
+          <div class="row"><button type="submit" class="btn primary">save DVR settings</button><span id="dvr-settings-status" class="muted" role="status" aria-live="polite"></span></div>
         </form>
       </div>
       <div class="card">

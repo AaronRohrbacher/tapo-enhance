@@ -1,6 +1,6 @@
 # Warm monochrome CRT.
 id: amber
-name: Amber Terminal
+name: WarGames
 colors:
   bg: "#080400"
   bg-elev: "#160b00"

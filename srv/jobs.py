@@ -10,7 +10,7 @@ import time
 import uuid
 from typing import Iterable
 
-from .downloader import make_runner
+from .downloader import ConversionQueue, cached_media_is_valid, make_fetch_runner
 from .recordings import Clip, Paths
 
 
@@ -49,9 +49,10 @@ class Job:
 
 
 class JobRegistry:
-    def __init__(self, paths: Paths, gateway):
+    def __init__(self, paths: Paths, gateway, conversions: ConversionQueue | None = None):
         self.paths = paths
         self.gateway = gateway
+        self.conversions = conversions or ConversionQueue()
         self._jobs: dict[str, Job] = {}
 
     def list(self) -> list[Job]:
@@ -77,18 +78,34 @@ class JobRegistry:
         return job
 
     async def _run(self, job: Job) -> None:
+        conversions: list[tuple[Clip, asyncio.Task]] = []
         try:
             for clip in job._clips:
                 if job._cancel.is_set():
                     break
                 job.current = f"{clip.date} {clip.start}"
                 out = self.paths.recording(clip)
-                if out.exists() and out.stat().st_size > 0:
+                if await cached_media_is_valid(out, clip.duration):
                     job.done += 1
                     continue
                 try:
-                    await self.gateway.submit_download(clip, make_runner(clip, self.paths))
+                    staged = await self.gateway.submit_download(
+                        clip, make_fetch_runner(clip, self.paths)
+                    )
+                    conversions.append((
+                        clip, self.conversions.submit(clip, self.paths, staged)
+                    ))
+                except Exception as e:
+                    job.failed += 1
+                    job.errors.append(f"{clip.key}: {type(e).__name__}: {e}")
+            for clip, task in conversions:
+                if job._cancel.is_set() and not task.done():
+                    task.cancel()
+                try:
+                    await task
                     job.done += 1
+                except asyncio.CancelledError:
+                    pass
                 except Exception as e:
                     job.failed += 1
                     job.errors.append(f"{clip.key}: {type(e).__name__}: {e}")

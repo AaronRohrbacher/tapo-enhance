@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .errors import ApiError, Code
+from .media import media_wait
 from .recordings import Clip, Paths
 
 
@@ -138,21 +139,36 @@ async def _stream_hls(
     )
     bytes_video = 0
     report("connecting", "Opening selected camera event", progress=0.0)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + clip.duration * 2 + 30
     try:
-        await recording.start()
-        async for response in recording.responses():
-            if cancel.is_set():
-                raise asyncio.CancelledError
+        await media_wait(recording.start(), cancel, timeout=15)
+        responses = recording.responses().__aiter__()
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError("camera playback exceeded its deadline")
+            try:
+                response = await media_wait(
+                    responses.__anext__(), cancel, timeout=min(10, remaining),
+                )
+            except StopAsyncIteration:
+                break
             if not response.plaintext:
                 continue
             try:
                 assert ffmpeg.stdin is not None
                 ffmpeg.stdin.write(response.plaintext)
                 bytes_video += len(response.plaintext)
-                await ffmpeg.stdin.drain()
+                await media_wait(ffmpeg.stdin.drain(), cancel, timeout=10)
             except (BrokenPipeError, ConnectionResetError):
                 break
     finally:
+        # Release the camera before waiting for local transcoder flushing.
+        try:
+            await asyncio.wait_for(recording.close(), timeout=5)
+        except Exception:
+            pass
         if ffmpeg.stdin is not None:
             try:
                 ffmpeg.stdin.close()
@@ -168,7 +184,6 @@ async def _stream_hls(
                 await asyncio.wait_for(task, timeout=2)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 task.cancel()
-        await recording.close()
 
     if not ready.is_set() and out.exists() and "segment_" in out.read_text(errors="ignore"):
         ready.set()

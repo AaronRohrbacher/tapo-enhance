@@ -121,6 +121,7 @@
       selected: Array.from(s.archive.selected).sort(),
       thumbs: s.archive.thumbs,
       downloads: s.downloads,
+      localKeys: Array.from(s.localKeys).sort(),
     });
     if (grid.dataset.signature === signature) return;
     grid.dataset.signature = signature;
@@ -136,8 +137,8 @@
       const k = `${c.date}/${c.startTime}/${c.endTime}`;
       const sel = s.archive.selected.has(k);
       const ts = s.archive.thumbs[k] || "idle";
-      const thumbLabel = ts === "idle" ? "not loaded" : ts;
-      const dlState = s.downloads[k];
+      const thumbLabel = ts === "idle" ? "waiting" : ts;
+      const dlState = s.downloads[k] || (s.localKeys.has(k) ? "done" : undefined);
       let cls = "clip-card";
       if (sel) cls += " selected";
       if (dlState === "running") cls += " downloading";
@@ -150,6 +151,7 @@
                  loading="lazy" decoding="async"
                  data-src="/api/thumb/${c.date}/${c.startTime}/${c.endTime}?s=${ts}" />
             <span class="badge ${ts}">${thumbLabel}</span>
+            ${dlState === "done" ? '<span class="local-badge">DOWNLOADED ✓</span>' : ""}
             <span class="check" data-action="toggle">✓</span>
           </div>
           <div class="meta">
@@ -162,7 +164,7 @@
           </div>
           <div class="actions">
             <button class="btn small" data-action="watch">watch</button>
-            <button class="btn small" data-action="download" ${dlState === "running" ? "disabled" : ""}>download</button>
+            <button class="btn small" data-action="download" ${dlState === "running" || dlState === "done" ? "disabled" : ""}>${dlState === "done" ? "downloaded" : "download"}</button>
           </div>
         </div>`;
     }).join("");
@@ -179,7 +181,7 @@
     el.classList.remove("hidden");
     el.textContent =
       `thumbnails: ${c.ready}/${c.total || s.archive.clips.length} ready` +
-      (c.idle ? ` • ${c.idle} waiting to load` : "") +
+      (c.idle ? ` • ${c.idle} waiting` : "") +
       (c.queued ? ` • ${c.queued} queued` : "") +
       (c.running ? ` • ${c.running} running` : "") +
       (c.failed ? ` • ${c.failed} failed` : "");
@@ -201,35 +203,20 @@
     `;
   }
 
-  // ── local list ────────────────────────────────────────────────────────
-  function fmtBytes(mb) {
-    return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`;
-  }
-  function renderLocal(s) {
-    const el = $("#local-list");
-    if (!el) return;
-    if (!s.local.length) {
-      el.innerHTML = '<p class="placeholder">no local clips yet — download something from archive.</p>';
-      return;
-    }
-    el.innerHTML = s.local.map((f) =>
-      `<div class="local-row" data-path="${f.path}">
-        <div>
-          <div>${f.date} • ${f.file}</div>
-          <div class="meta">${fmtBytes(f.size_mb)}</div>
-        </div>
-        <div class="muted">play ▶</div>
-      </div>`
-    ).join("");
-  }
-
   function renderCache(s) {
     const el = $("#cache-rows");
     if (!el) return;
     const u = s.cache;
-    el.innerHTML = ["recordings", "thumbs", "previews", "playback", "stream"].map((k) =>
-      `<div class="cache-row"><span>${k}</span><span class="muted">${u[k + "_files"] || 0} files</span><span>${fmtMb(u[k] || 0)}</span></div>`
-    ).join("") + `<div class="cache-row total"><span>total</span><span></span><span>${fmtMb(u.total || 0)}</span></div>`;
+    const buckets = {
+      recordings: ["downloaded recordings", "Local DVR MP4s; playback uses these files directly."],
+      thumbs: ["thumbnails", "Cached still images for recording cards."],
+      previews: ["temporary recording MP4s", "Browser-playable MP4 copies fetched from the camera without adding them to the downloaded DVR archive."],
+      playback: ["undownloaded-recording HLS files", "HLS playlists and two-second video segments generated while watching a camera recording that has not been downloaded."],
+      stream: ["live-view buffer", "Temporary HLS segments used by the Live tab."],
+    };
+    el.innerHTML = Object.entries(buckets).map(([key, label]) =>
+      `<div class="cache-row"><span class="cache-label"><span>${label[0]}</span><span class="muted">${label[1]}</span></span><span class="muted">${u[key + "_files"] || 0} files</span><span>${fmtMb(u[key] || 0)}</span></div>`
+    ).join("") + `<div class="cache-row total"><span>total cache</span><span></span><span>${fmtMb(u.total || 0)}</span></div>`;
   }
   function fmtMb(b) {
     if (!b) return "0 B";
@@ -326,7 +313,7 @@
     $, $$,
     renderTabs, renderCamera, renderGateway, renderLive,
     renderArchive, renderArchiveStatus, renderBulk,
-    renderLocal, renderCache, renderSettings, renderFeatures,
+    renderCache, renderSettings, renderFeatures,
     toast,
   };
 })(window);

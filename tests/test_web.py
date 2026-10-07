@@ -5,14 +5,20 @@ responses match what the frontend expects."""
 from __future__ import annotations
 
 import json
+import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import logging
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from srv import recordings as rec_mod
 from srv.config import Settings
 from srv.errors import Code
-from srv.web import _battery_summary, build_app
+from srv.web import HealthcheckAccessFilter, _battery_summary, build_app
 
 
 @pytest.fixture
@@ -29,6 +35,73 @@ def client(fake_media_tapo, cache_dir, monkeypatch):
 
 
 # ── camera info ────────────────────────────────────────────────────────────
+
+
+def test_live_to_recordings_concurrent_http_requests_do_not_kill_queue(client, monkeypatch):
+    """Reproduce a tab switch: stop Live and request dates/show-date together."""
+    c, _camera = client
+    gateway = c.app.state.gateway
+    hls = c.app.state.hls
+    closing = threading.Event()
+    queued = threading.Event()
+    release = asyncio.Event()
+    submits = 0
+    original_submit = gateway._submit
+
+    async def started():
+        hls._generation += 1
+        hls._playable_generation = hls._generation
+
+    async def live(_tapo, cancel, _consumer):
+        await cancel.wait()
+        closing.set()
+        await release.wait()
+        raise asyncio.CancelledError
+
+    def submit(*args, **kwargs):
+        nonlocal submits
+        future = original_submit(*args, **kwargs)
+        submits += 1
+        if submits == 2:
+            queued.set()
+        return future
+
+    monkeypatch.setattr(hls, "started", started)
+    monkeypatch.setattr(gateway, "_live_source", live)
+    monkeypatch.setattr(gateway, "_submit", submit)
+    assert c.post("/api/stream/start").status_code == 200
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        stopped = pool.submit(c.post, "/api/stream/stop")
+        try:
+            assert closing.wait(2)
+            dates = pool.submit(c.get, "/api/recordings/dates")
+            clips = pool.submit(c.get, "/api/recordings/20260426")
+            assert queued.wait(2)
+        finally:
+            c.portal.call(release.set)
+        assert stopped.result(timeout=2).status_code == 200
+        assert dates.result(timeout=2).status_code == 200
+        clip_response = clips.result(timeout=2)
+        assert clip_response.status_code == 200
+        assert len(clip_response.json()["clips"]) == 2
+
+    clip = {"date": "20990101", "startTime": 1700000000, "endTime": 1700000002}
+    # Continue through actual remote HLS and download runners, real ffmpeg,
+    # then confirm the exact same recording plays locally, not from camera.
+    remote = c.post("/api/recordings/play", json=clip)
+    assert remote.status_code == 200
+    assert remote.json()["source"] == "camera"
+    assert c.get(remote.json()["url"]).status_code == 200
+    downloaded = c.post("/api/recordings/download", json=clip)
+    assert downloaded.status_code == 200
+    local = c.post("/api/recordings/play", json=clip)
+    assert local.status_code == 200
+    assert local.json()["source"] == "local"
+    assert c.get(local.json()["url"]).status_code == 200
+    status = c.get("/api/gateway/status").json()
+    assert status["queued"] == 0
+    assert status["busy"] is None
+    assert c.portal.call(lambda: not gateway._task.done())
 
 
 def test_index_has_name_and_favicon(client):
@@ -48,13 +121,41 @@ def test_dvr_setup_is_separate_and_settings_are_in_settings_tab(client):
     assert 'id="setup-dvr-step"' in page
     assert 'id="setup-dvr-form"' in page
     assert page.index('id="tab-settings"') < page.index('id="dvr-settings-form"')
+    archive_start = page.index('id="tab-archive"')
+    settings_start = page.index('id="tab-settings"')
+    assert 'data-tab="local"' not in page
+    assert 'id="tab-local"' not in page
+    assert 'id="local-list"' not in page
+    assert archive_start < page.index('id="dvr-status"') < settings_start
+    assert archive_start < page.index('id="dvr-conversion-card"') < settings_start
+    assert page.index('id="dvr-progress-wrap"') < page.index('id="dvr-conversion-card"')
+    assert archive_start < page.index('id="dvr-availability"') < settings_start
+    assert archive_start < page.index('id="dvr-window"') < settings_start
+    assert archive_start < page.index('id="btn-dvr-sync"') < settings_start
+    assert archive_start < page.index('id="cache-rows"') < settings_start
+    assert 'id="dvr-settings-status"' in page
     assert "12:10am" in page
     assert page.count('name="interval_minutes"') == 2
-    assert ">Sync now<" in page
+    assert page.count('name="initial_sync"') == 4
+    assert "sync existing camera history now" in page
+    assert "sync missing camera history after saving" in page
+    assert "wait until the next scheduled interval" in page
+    assert ">Check and download now<" in page
+    assert "There is one downloaded-recordings library." in page
+    assert ">show date<" in page
+    assert ">show last 30 days<" in page
+
+
+def test_live_dvr_status_does_not_overwrite_settings_form(client):
+    """SSE progress is frequent during boot sync and must remain display-only."""
+    page = (Path(__file__).parent.parent / "static" / "main.js").read_text()
+    assert "function hydrateDvrForm(data)" in page
+    assert "else if (evt.type === \"dvr\") applyDvr(evt);" in page
+    assert "hydrateDvrForm(evt)" not in page
 
 
 def test_dvr_schedule_settings_and_manual_sync_validation(client):
-    c, _ = client
+    c, fake = client
     saved = c.post("/api/dvr", json={
         "enabled": False, "retention_days": 14, "keep_forever": True,
         "interval_minutes": 360, "daily_time": "00:10",
@@ -62,6 +163,10 @@ def test_dvr_schedule_settings_and_manual_sync_validation(client):
     assert saved.status_code == 200
     assert saved.json()["interval_minutes"] == 360
     assert saved.json()["keep_forever"] is True
+    c.get("/api/dvr")
+    history_call = next(call for call in reversed(fake.calls) if call[0] == "getRecordingsList")
+    start, end = (datetime.strptime(value, "%Y%m%d") for value in history_call[1])
+    assert (end - start).days == 13
     invalid = c.post("/api/dvr", json={
         "enabled": False, "retention_days": 14, "keep_forever": False,
         "interval_minutes": 7, "daily_time": "bad",
@@ -75,6 +180,20 @@ def test_app_metadata_has_single_source_version(client):
     version = (Path(__file__).parent.parent / "VERSION").read_text().strip()
     assert c.get("/api/app").json()["version"] == version
     assert f"v{version}" in c.get("/").text
+
+
+def test_successful_healthcheck_access_log_is_suppressed_only():
+    access_filter = HealthcheckAccessFilter()
+
+    def record(path, status):
+        return logging.LogRecord(
+            "uvicorn.access", logging.INFO, __file__, 1, "%s %s %s %s %s",
+            (("127.0.0.1", 44248), "GET", path, "1.1", status), None,
+        )
+
+    assert access_filter.filter(record("/api/app", 200)) is False
+    assert access_filter.filter(record("/api/app", 500)) is True
+    assert access_filter.filter(record("/api/dvr", 200)) is True
 
 
 def test_themes_endpoint_returns_yaml_themes(client):
@@ -131,6 +250,26 @@ def test_first_run_discovery_uses_detected_or_user_subnet(client, monkeypatch):
     assert scanned == ["192.168.7.0/24", "10.44.3.0/24"]
 
 
+def test_discovery_recovers_only_exact_saved_camera_from_arp(client, monkeypatch):
+    c, _fake = client
+    c.app.state.settings.mac = "78:20:51:1e:50:7a"
+    monkeypatch.setattr("srv.discovery.local_subnets", lambda: ["10.1.1.0/24"])
+    monkeypatch.setattr("srv.discovery.discover_candidates", lambda _subnet: [])
+    monkeypatch.setattr("srv.discovery.read_arp_table", lambda: [
+        __import__("srv.discovery", fromlist=["ArpEntry"]).ArpEntry(
+            "10.1.1.161", "78:20:51:1e:50:7a"
+        ),
+        __import__("srv.discovery", fromlist=["ArpEntry"]).ArpEntry(
+            "10.1.1.137", "78:20:51:1e:5b:9f"
+        ),
+    ])
+    cameras = c.get("/api/discovery").json()["cameras"]
+    assert cameras == [{
+        "ip": "10.1.1.161", "mac": "78:20:51:1e:50:7a",
+        "source": "saved camera identity", "known_camera": True,
+    }]
+
+
 def test_web_configuration_encrypts_and_never_returns_password(tmp_path, fake_media_tapo):
     settings = Settings(cache_root=tmp_path / "private", key_root=tmp_path / "keys")
     app = build_app(settings=settings, tapo_factory=lambda _s: fake_media_tapo)
@@ -142,8 +281,9 @@ def test_web_configuration_encrypts_and_never_returns_password(tmp_path, fake_me
             "subnet": "10.0.0.0/24", "mac": "78:20:51:aa:bb:cc",
         })
         assert saved.status_code == 200
-        assert saved.json()["camera_oldest_date"] == "20260424"
-        assert saved.json()["camera_available_days"] >= 1
+        assert saved.json()["camera_oldest_date"] is None
+        assert saved.json()["camera_available_days"] == 0
+        assert saved.json()["dvr_retention_days"] == 7
         after = c.get("/api/config").json()
         assert "password" not in after
         assert "password_set" not in after
@@ -201,11 +341,72 @@ def test_watch_returns_progressive_hls_without_archiving(client):
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
+    assert body["source"] == "camera"
     manifest = c.get(body["url"])
     assert manifest.status_code == 200
     assert "#EXTM3U" in manifest.text
     assert c.get("/api/recordings/local").json()["files"] == []
     assert c.post("/api/recordings/play/stop").json()["ok"] is True
+
+
+def test_watch_uses_valid_local_recording_without_camera(client, make_av_mp4):
+    c, tapo = client
+    clip = {
+        "date": "20260426",
+        "startTime": 1777187350,
+        "endTime": 1777187352,
+    }
+    cached = c.app.state.paths.recording(
+        rec_mod.Clip(clip["date"], clip["startTime"], clip["endTime"])
+    )
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    make_av_mp4(cached, duration=2)
+    sessions_before = len(tapo.sessions)
+
+    response = c.post("/api/recordings/play", json=clip)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "url": f"/recordings/{clip['date']}/{cached.name}",
+        "source": "local",
+    }
+    assert len(tapo.sessions) == sessions_before
+
+
+def test_local_inventory_excludes_corrupt_recording(client):
+    c, _ = client
+    paths = c.app.state.paths
+    corrupt = paths.recordings / "20260426" / "1777187350_1777187352.mp4"
+    corrupt.parent.mkdir(parents=True, exist_ok=True)
+    corrupt.write_bytes(b"not an mp4" * 200)
+
+    assert c.get("/api/recordings/local").json()["files"] == []
+
+
+def test_watch_repairs_corrupt_local_recording(client, ffprobe_streams):
+    c, tapo = client
+    clip = {
+        "date": "20260426",
+        "startTime": 1777187350,
+        "endTime": 1777187352,
+    }
+    cached = c.app.state.paths.recording(
+        rec_mod.Clip(clip["date"], clip["startTime"], clip["endTime"])
+    )
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    corrupt = b"not an mp4" * 200
+    cached.write_bytes(corrupt)
+    sessions_before = len(tapo.sessions)
+
+    response = c.post("/api/recordings/play", json=clip)
+
+    assert response.status_code == 200
+    assert response.json()["source"] == "local"
+    assert response.json()["repaired"] is True
+    assert cached.read_bytes() != corrupt
+    assert any(s["codec_type"] == "video" for s in ffprobe_streams(cached))
+    assert len(tapo.sessions) == sessions_before + 1
 
 
 # ── thumb endpoint shape ───────────────────────────────────────────────────

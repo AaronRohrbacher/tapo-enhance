@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+import logging
 
-from srv.web import build_app  # noqa: E402
+from srv.web import HealthcheckAccessFilter, build_app  # noqa: E402
 
 app = build_app()
 
@@ -28,6 +29,7 @@ if __name__ == "__main__":
     config = uvicorn.Config(
         app, host=host, port=port, timeout_graceful_shutdown=1,
     )
+    logging.getLogger("uvicorn.access").addFilter(HealthcheckAccessFilter())
     try:
         ClosingServer(config).run()
     except KeyboardInterrupt:

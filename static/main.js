@@ -28,7 +28,6 @@
     UI.renderArchive(s);
     UI.renderArchiveStatus(s);
     UI.renderBulk(s);
-    UI.renderLocal(s);
     UI.renderCache(s);
     UI.renderFeatures(s);
   });
@@ -38,6 +37,9 @@
     }
     if (tab === "settings") {
       if (!state.features) loadFeatures();
+      loadDvr();
+    } else if (tab === "archive") {
+      loadLocalRecordings();
       loadDvr();
     }
   });
@@ -93,7 +95,7 @@
     return r.data.configured;
   }
 
-  function applyDvr(data) {
+  function hydrateDvrForm(data) {
     const days = data.retention_days || 1;
     const form = $("#dvr-settings-form");
     form.elements.enabled.checked = !!data.enabled;
@@ -105,28 +107,83 @@
     form.dataset.originalKeep = String(!!data.keep_forever);
     toggleDvrFields(form);
     toggleDailyTime(form);
-    const camera = data.camera_history_error
-      ? `Camera history unavailable: ${data.camera_history_error}.`
-      : data.camera_available_days
-        ? `Camera: ${data.camera_available_days}-day span, oldest ${formatCameraDate(data.camera_oldest_date)}.`
-        : "Camera: no recording history found.";
+    renderDvrWindow(days, !!data.keep_forever);
+  }
+
+  function renderDvrWindow(days, keepForever) {
+    const count = Math.max(1, Number(days) || 1);
+    $("#dvr-window").textContent = `Sync window: ${count} day${count === 1 ? "" : "s"}${keepForever ? " • local copies kept permanently" : ""}`;
+  }
+
+  function applyDvr(data) {
+    renderDvrWindow(data.retention_days, !!data.keep_forever);
     const local = data.available_days
-      ? `Local: ${data.available_days} day${data.available_days === 1 ? "" : "s"} containing video, ${data.local_files} clip${data.local_files === 1 ? "" : "s"}.`
-      : "Local: no downloaded video yet.";
-    $("#dvr-availability").textContent = `${camera} ${local}`;
+      ? `Downloaded recordings: ${data.local_files} clip${data.local_files === 1 ? "" : "s"} across ${data.available_days} day${data.available_days === 1 ? "" : "s"}.`
+      : "Downloaded recordings: none yet.";
+    $("#dvr-availability").textContent = local;
+    $("#dvr-schedule").textContent = data.enabled
+      ? `Automatic sync: ${data.schedule}.`
+      : "Automatic sync is disabled. Enable DVR Mode in Settings.";
     const syncButton = $("#btn-dvr-sync");
+    const progressWrap = $("#dvr-progress-wrap");
+    const progress = Math.max(0, Math.min(1, Number(data.download_progress) || 0));
+    const percent = Math.round(progress * 100);
+    progressWrap.classList.toggle("hidden", !data.syncing || progress >= 1);
+    progressWrap.setAttribute("aria-valuenow", String(percent));
+    $("#dvr-progress-fill").style.width = `${percent}%`;
+    if (data.syncing) {
+      const finished = Number(data.download_complete) || 0;
+      const failed = Number(data.download_failed) || 0;
+      const total = Number(data.sync_total) || 0;
+      const eta = formatEta(data.download_eta_seconds);
+      $("#dvr-progress-detail").textContent = total
+        ? `${finished} of ${total} downloaded${failed ? ` • ${failed} failed` : ""} • ${percent}%${eta ? ` • ETA ${eta}` : ""}`
+        : "Checking camera history…";
+    }
+    const conversionProgress = Math.max(0, Math.min(1, Number(data.conversion_current_progress) || 0));
+    const conversionPercent = Math.round(conversionProgress * 100);
+    const conversionKey = data.conversion_current_key || "";
+    const conversionActive = !!data.syncing && data.sync_total > 0;
+    $("#dvr-conversion-card").classList.toggle("hidden", !conversionActive);
+    $("#dvr-conversion-progress").setAttribute("aria-valuenow", String(conversionPercent));
+    $("#dvr-conversion-fill").style.width = `${conversionPercent}%`;
+    $("#dvr-conversion-status").textContent = conversionKey
+      ? `CONVERTING ${conversionKey}`
+      : "WAITING FOR DOWNLOADED VIDEOS";
+    const conversionEta = formatEta(data.conversion_current_eta_seconds);
+    $("#dvr-conversion-detail").textContent = conversionKey
+      ? `${conversionPercent}%${conversionEta ? ` • ETA ${conversionEta}` : ""}`
+      : "Conversion will begin when a download is staged.";
     if (syncButton) {
       const wasSyncing = syncButton.dataset.syncing === "true";
       syncButton.disabled = !!data.syncing || !data.enabled;
       syncButton.dataset.syncing = String(!!data.syncing);
-      if (data.syncing) $("#dvr-status").textContent = "syncing missing videos…";
-      else if (wasSyncing) $("#dvr-status").textContent = data.last_error ? `sync failed: ${data.last_error}` : "sync complete";
+      if (data.syncing && progress < 1) $("#dvr-status").textContent = "DOWNLOADING CAMERA VIDEOS";
+      else if (data.syncing) $("#dvr-status").textContent = "CAMERA DOWNLOADS COMPLETE";
+      else if (!data.enabled) $("#dvr-status").textContent = "DVR sync is disabled";
+      else if (data.last_error) $("#dvr-status").textContent = `LAST SYNC FAILED — ${data.last_error}`;
+      else if (wasSyncing) $("#dvr-status").textContent = "SYNC COMPLETE";
+      else if (data.last_sync) $("#dvr-status").textContent = `Last sync completed ${new Date(data.last_sync * 1000).toLocaleString()}`;
+      else $("#dvr-status").textContent = "Waiting for first sync";
     }
+  }
+
+  function formatEta(value) {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds < 0) return "";
+    if (seconds < 60) return `${Math.max(1, Math.round(seconds))}s`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ${minutes % 60}m`;
   }
 
   async function loadDvr() {
     const r = await API.get("/api/dvr");
-    if (r.ok) applyDvr(r.data);
+    if (r.ok) {
+      hydrateDvrForm(r.data);
+      applyDvr(r.data);
+    }
     else $("#dvr-availability").textContent = "DVR status unavailable: " + r.error;
     return r;
   }
@@ -210,6 +267,7 @@
       else if (evt.type === "thumb") applyThumb(evt);
       else if (evt.type === "operation") applyOperation(evt);
       else if (evt.type === "dvr") applyDvr(evt);
+      else if (evt.type === "cache") applyCache(evt.usage);
     };
     es.onerror = () => {
       state.events = { status: "reconnecting", error: "Progress connection lost; reconnecting" };
@@ -233,7 +291,9 @@
       const meta = card && card.querySelector(".meta-dur");
       if (meta) meta.textContent = message;
     } else if (evt.operation === "dvr") {
-      $("#dvr-status").textContent = `sync: ${message}`;
+      if (evt.phase === "complete") {
+        set((s) => { s.localKeys.add(evt.key); });
+      }
       if (evt.phase === "error") toast("DVR sync: " + (evt.error || message), "error");
     } else if (evt.operation === "live") {
       if (evt.phase === "error") {
@@ -492,7 +552,7 @@
   async function loadDate(date) {
     const r = await API.get(`/api/recordings/${date}`);
     if (!r.ok) {
-      toast("archive load failed: " + r.error, "error");
+      toast("could not show camera recordings: " + r.error, "error");
       return;
     }
     set((s) => {
@@ -566,7 +626,7 @@
       set((s) => { s.downloads[k] = "done"; });
       SFX.done();
       toast(`saved ${clip.date} • ${formatHMS(clip.startTime)}`, "success");
-      loadLocal();
+      loadLocalRecordings();
     } else {
       set((s) => { s.downloads[k] = "failed"; });
       SFX.denied();
@@ -619,7 +679,11 @@
       toast("playback failed: " + message, "error");
     };
 
-    if (window.Hls && Hls.isSupported()) {
+    if (started.data.source === "local") {
+      vid.src = url;
+      vid.addEventListener("loadedmetadata", markPlaying, { once: true });
+      vid.addEventListener("error", () => fail("local recording could not be played"), { once: true });
+    } else if (window.Hls && Hls.isSupported()) {
       playerHls = new Hls({
         enableWorker: true,
         lowLatencyMode: false,
@@ -673,39 +737,21 @@
     } else {
       toast(`bulk ${r.data.job.status}: ${r.data.job.done} ok / ${r.data.job.failed} failed`, r.data.job.failed ? "error" : "success");
       setTimeout(() => set((s) => { s.bulk = null; }), 5000);
-      loadLocal();
+      loadLocalRecordings();
     }
   }
 
-  // ── local list ───────────────────────────────────────────────────────
-  async function loadLocal() {
+  // Correlate the on-disk archive with camera clips. This survives reloads
+  // and includes files downloaded by unattended DVR syncs.
+  async function loadLocalRecordings() {
     const r = await API.get("/api/recordings/local");
-    if (r.ok) set((s) => { s.local = r.data.files; });
-    loadCache();
+    if (r.ok) set((s) => { s.localKeys = new Set(r.data.files.map((file) => file.key)); });
+    return r;
   }
-  $("#local-list").addEventListener("click", async (ev) => {
-    const row = ev.target.closest(".local-row");
-    if (!row) return;
-    const card = $("#player-card");
-    const vid = $("#player-video");
-    ++watchSeq;
-    if (playerHls) { playerHls.destroy(); playerHls = null; }
-    await API.post("/api/recordings/play/stop", {});
-    card.classList.remove("hidden");
-    $("#player-title").textContent = row.querySelector("div").textContent;
-    vid.src = row.dataset.path;
-    vid.play().catch(() => {});
-    $("#tab-archive").classList.add("active");
-    $$(".tab-content").forEach((c) => c.classList.toggle("active", c.id === "tab-archive"));
-    $$(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === "archive"));
-    card.scrollIntoView({ behavior: "smooth" });
-  });
 
   // ── cache ────────────────────────────────────────────────────────────
-  async function loadCache() {
-    const r = await API.get("/api/cache/usage");
-    if (!r.ok) return;
-    const u = r.data.usage;
+  function applyCache(u) {
+    if (!u) return;
     set((s) => {
       s.cache = {
         recordings: u.recordings.bytes, recordings_files: u.recordings.files,
@@ -724,8 +770,7 @@
       const r = await API.post("/api/cache/clear", { target });
       if (!r.ok) { toast(r.error, "error"); return; }
       toast(`purged ${target}: ${r.data.removed_files} files`, "success");
-      loadCache();
-      if (target === "recordings" || target === "all") loadLocal();
+      if (target === "recordings" || target === "all") loadLocalRecordings();
     });
   });
 
@@ -837,7 +882,7 @@
       return;
     }
     const dvrForm = $("#setup-dvr-form");
-    const defaultDays = Math.max(1, Number(r.data.camera_available_days) || 1);
+    const defaultDays = Math.max(1, Number(r.data.dvr_retention_days) || 7);
     dvrForm.elements.enabled.checked = true;
     dvrForm.elements.retention_days.value = defaultDays;
     dvrForm.elements.retention.value = "delete";
@@ -848,7 +893,7 @@
     $("#setup-camera-history").textContent = r.data.history_error
       ? "Camera connected, but its recording history could not be read. The one-day value can be changed, or reconnect to retry."
       : r.data.camera_available_days
-        ? `Camera history starts ${formatCameraDate(r.data.camera_oldest_date)} — a ${r.data.camera_available_days}-day span through today. This is the default below.`
+        ? "Camera recording history is available within the configured sync window."
         : "The camera currently reports no recorded videos. DVR will retain the selected window as new videos arrive.";
     $("#setup-camera-step").classList.add("hidden");
     $("#setup-dvr-step").classList.remove("hidden");
@@ -868,19 +913,20 @@
       keep_forever: form.elements.retention.value === "forever",
       interval_minutes: form.elements.interval_minutes.value,
       daily_time: form.elements.daily_time.value || "00:10",
+      sync_now: form.elements.initial_sync.value === "now",
     });
     submit.disabled = false;
     if (!r.ok) { progress.textContent = "failed: " + r.error; toast(r.error, "error"); return; }
     progress.textContent = "saved";
     showSetup(false);
     await loadStatus();
-    loadLocal();
+    loadLocalRecordings();
   });
 
   $("#dvr-settings-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
-    const status = $("#dvr-status");
+    const status = $("#dvr-settings-status");
     const keepForever = form.elements.retention.value === "forever";
     const days = Number(form.elements.retention_days.value);
     const reducingRetention = !keepForever && (
@@ -894,9 +940,14 @@
       keep_forever: keepForever,
       interval_minutes: form.elements.interval_minutes.value,
       daily_time: form.elements.daily_time.value || "00:10",
+      sync_now: form.elements.initial_sync.value === "now",
     });
     status.textContent = r.ok ? "saved" : "failed: " + r.error;
-    if (r.ok) { applyDvr(r.data); toast("DVR settings saved", "success"); }
+    if (r.ok) {
+      hydrateDvrForm(r.data);
+      applyDvr(r.data);
+      toast("DVR settings saved", "success");
+    }
     else toast(r.error, "error");
   });
   $("#btn-dvr-sync").addEventListener("click", async () => {
@@ -954,6 +1005,7 @@
     await loadThemes();
     const configured = await loadConfig();
     if (configured) await loadStatus();
-    loadLocal();
+    loadLocalRecordings();
+    loadDvr();
   })();
 })();

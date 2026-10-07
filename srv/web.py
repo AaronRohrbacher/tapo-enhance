@@ -12,6 +12,7 @@ classification simple."""
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -32,6 +33,7 @@ from fastapi.templating import Jinja2Templates
 from . import cache as cache_mod
 from . import discovery as discovery_mod
 from . import recordings as rec_mod
+from .downloader import ConversionQueue, cached_media_is_valid
 from . import recovery as recovery_mod
 from . import snapshot as snap_mod
 from .camera import CameraConnection
@@ -52,6 +54,17 @@ from .version import __version__
 
 
 log = logging.getLogger("tapo")
+
+
+class HealthcheckAccessFilter(logging.Filter):
+    """Hide successful Docker probes without hiding real endpoint failures."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) < 5:
+            return True
+        _client, method, path, _http_version, status = args[:5]
+        return not (method == "GET" and path == "/api/app" and status == 200)
 
 
 def _battery_summary(raw) -> tuple[int | float | None, bool]:
@@ -118,6 +131,38 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         settings, tapo_factory=tapo_factory, rediscover=_rediscover_ip
     )
     hub = EventHub()
+    cache_push_handle: asyncio.TimerHandle | None = None
+    last_cache_push = 0.0
+
+    def cache_event() -> dict:
+        return {"type": "cache", "usage": rec_mod.cache_usage(paths)}
+
+    def push_cache() -> None:
+        nonlocal cache_push_handle, last_cache_push
+        cache_push_handle = None
+        last_cache_push = asyncio.get_running_loop().time()
+        hub.emit(cache_event())
+
+    def schedule_cache_push() -> None:
+        """Coalesce filesystem changes; this is event-driven, never polling."""
+        nonlocal cache_push_handle
+        if cache_push_handle is not None:
+            return
+        loop = asyncio.get_running_loop()
+        delay = max(0.0, 5.0 - (loop.time() - last_cache_push))
+        cache_push_handle = loop.call_later(delay, push_cache)
+
+    def emit_event(event: dict) -> None:
+        hub.emit(event)
+        changed = (
+            event.get("type") == "thumb" and event.get("status") in {"ready", "failed"}
+        ) or (
+            event.get("type") == "operation" and event.get("phase") in {
+                "complete", "error", "cancelled", "paused", "reconnecting", "stopped",
+            }
+        )
+        if changed:
+            schedule_cache_push()
 
     async def _on_camera_error(exc):
         # A camera op in the gateway (live/thumb/download) failed. If it's a
@@ -129,22 +174,26 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
     gateway = CameraGateway(
         get_tapo=camera.get,
         live_source=camera_live_source,
-        on_event=hub.emit,
+        on_event=emit_event,
         on_camera_error=_on_camera_error,
     )
-    backfill = ThumbBackfill(paths, gateway, on_event=hub.emit)
-    jobs = JobRegistry(paths, gateway)
+    backfill = ThumbBackfill(paths, gateway, on_event=emit_event)
+    conversions = ConversionQueue()
+    jobs = JobRegistry(paths, gateway, conversions)
     dvr = DvrService(
-        settings, paths, camera.with_retry, gateway, on_event=hub.emit,
+        settings, paths, camera.with_retry, gateway, on_event=emit_event,
+        conversions=conversions,
     )
-    hls_consumer = HlsConsumer(paths.stream, on_event=hub.emit)
+    hls_consumer = HlsConsumer(paths.stream, on_event=emit_event)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         await gateway.start()
         backfill.start()
         if settings.dvr_enabled:
-            dvr.start()
+            # Reconcile missing files immediately after every restart. Valid
+            # local files are skipped and staged conversions are resumed.
+            dvr.start(initial_sync=True)
         try:
             yield
         finally:
@@ -228,17 +277,22 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         camera_history_error = None
         if settings.configured():
             try:
-                dates = await _to_thread(
-                    camera.with_retry,
-                    lambda t: rec_mod.parse_dates(t.getRecordingsList()),
+                days = max(1, int(settings.dvr_retention_days))
+                end = datetime.now()
+                start = end - timedelta(days=days - 1)
+                dates = await _camera_query(
+                    f"dvr-status:{start:%Y%m%d}:{end:%Y%m%d}",
+                    lambda t: rec_mod.parse_dates(t.getRecordingsList(
+                        start_date=start.strftime("%Y%m%d"),
+                        end_date=end.strftime("%Y%m%d"),
+                    )),
                 )
+                dates = [date for date in dates if start.strftime("%Y%m%d") <= date <= end.strftime("%Y%m%d")]
                 dvr._camera_oldest = min(dates) if dates else None
             except Exception as exc:
                 dvr._last_error = f"{type(exc).__name__}: {exc}"
                 camera_history_error = str(exc) or type(exc).__name__
         result = dvr.config()
-        if result["retention_days"] is None:
-            result["retention_days"] = max(1, result["camera_available_days"])
         return {"ok": True, **result, "camera_history_error": camera_history_error}
 
     @app.post("/api/dvr")
@@ -247,9 +301,11 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         enabled = body.get("enabled", False)
         keep_forever = body.get("keep_forever", False)
         interval = body.get("interval_minutes", 1440)
+        sync_now = body.get("sync_now", True)
         daily_time = str(body.get("daily_time") or "00:10")
         days = body.get("retention_days")
-        if not isinstance(enabled, bool) or not isinstance(keep_forever, bool):
+        if (not isinstance(enabled, bool) or not isinstance(keep_forever, bool)
+                or not isinstance(sync_now, bool)):
             raise ApiError(Code.BAD_REQUEST, "DVR settings have invalid values", status=400)
         try:
             retention_days = int(days)
@@ -268,7 +324,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
             return {"ok": True, **await dvr.configure(
                 enabled=enabled, retention_days=retention_days,
                 keep_forever=keep_forever, interval_minutes=interval_minutes,
-                daily_time=daily_time,
+                daily_time=daily_time, sync_now=sync_now,
             )}
         except OSError as exc:
             raise ApiError(Code.INTERNAL, "DVR settings could not be saved", status=500) from exc
@@ -301,6 +357,22 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
                     )
                     found.append(candidate)
                     seen.add(candidate["ip"])
+            # A sleeping camera may not expose 8800, but an exact persisted
+            # camera MAC is safe to recover from ARP. Never use a generic Tapo
+            # OUI here—the paired chime has one too.
+            if settings.mac:
+                known_ip = discovery_mod.find_arp_by_mac(
+                    discovery_mod.read_arp_table(), settings.mac,
+                )
+                if (known_ip and known_ip not in seen
+                        and ipaddress.ip_address(known_ip) in ipaddress.ip_network(network)):
+                    found.append({
+                        "ip": known_ip,
+                        "mac": discovery_mod.normalize_mac(settings.mac),
+                        "source": "saved camera identity",
+                        "known_camera": True,
+                    })
+                    seen.add(known_ip)
         return {"ok": True, "subnets": networks, "cameras": found}
 
     @app.post("/api/config")
@@ -334,10 +406,20 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
                 basic = await _to_thread(camera.with_retry, lambda t: t.getBasicInfo())
                 history_error = None
                 try:
+                    days = max(1, int(settings.dvr_retention_days))
+                    history_end = datetime.now()
+                    history_start = history_end - timedelta(days=days - 1)
                     dates = await _to_thread(
                         camera.with_retry,
-                        lambda t: rec_mod.parse_dates(t.getRecordingsList()),
+                        lambda t: rec_mod.parse_dates(t.getRecordingsList(
+                            start_date=history_start.strftime("%Y%m%d"),
+                            end_date=history_end.strftime("%Y%m%d"),
+                        )),
                     )
+                    dates = [
+                        date for date in dates
+                        if history_start.strftime("%Y%m%d") <= date <= history_end.strftime("%Y%m%d")
+                    ]
                     camera_oldest = min(dates) if dates else None
                     camera_days = days_between(camera_oldest)
                     dvr._camera_oldest = camera_oldest
@@ -361,6 +443,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
                     "alias": _nested(basic, "device_info", "basic_info", "device_alias", default="camera"),
                     "camera_oldest_date": camera_oldest,
                     "camera_available_days": camera_days,
+                    "dvr_retention_days": settings.dvr_retention_days,
                     "history_error": history_error,
                 }
             except Exception as exc:
@@ -379,6 +462,13 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
     async def _to_thread(fn, *args, **kwargs):
         return await asyncio.get_event_loop().run_in_executor(None, lambda: fn(*args, **kwargs))
 
+    async def _camera_query(key, op):
+        async def runner(_tapo, _cancel):
+            # Keep CameraConnection's wake/reconnect retry, but execute it
+            # while the gateway exclusively owns camera access.
+            return await asyncio.to_thread(camera.with_retry, op)
+        return await gateway.submit_query(key, runner, label=key)
+
     @app.get("/api/info")
     async def info():
         def op(t):
@@ -392,7 +482,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
                 settings.remember_mac(mac)
             return {"ok": True, "info": basic, "battery": bat, "host": settings.host}
         try:
-            return await _to_thread(camera.with_retry, op)
+            return await _camera_query("info", op)
         except ApiError:
             raise
         except Exception as e:
@@ -422,7 +512,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
                 "is_charging": is_charging,
             }
         try:
-            return await _to_thread(camera.with_retry, op)
+            return await _camera_query("camera-status", op)
         except ApiError:
             raise
         except Exception as e:
@@ -432,8 +522,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
     async def reconnect():
         camera.invalidate()
         try:
-            t = await _to_thread(camera.get)
-            await _to_thread(t.getBasicInfo)
+            await _camera_query("reconnect", lambda t: t.getBasicInfo())
             return {"ok": True}
         except Exception as e:
             raise _classify(e)
@@ -494,7 +583,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
                 "errors": errors,
             }
         try:
-            return await _to_thread(camera.with_retry, op)
+            return await _camera_query("features", op)
         except Exception as e:
             raise _classify(e)
 
@@ -521,7 +610,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         else:
             raise ApiError(Code.BAD_REQUEST, f"unsupported feature or value: {name}", status=400)
         try:
-            await _to_thread(camera.with_retry, call)
+            await _camera_query(f"set-feature:{name}", call)
             return {"ok": True, "feature": name, "value": value}
         except Exception as e:
             raise _classify(e)
@@ -549,6 +638,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
                 # Send the current gateway snapshot immediately so a freshly
                 # connected UI is correct without waiting for the next change.
                 yield f"data: {json.dumps(gateway.status())}\n\n"
+                yield f"data: {json.dumps(cache_event())}\n\n"
                 while True:
                     evt = await q.get()
                     if evt is EventHub.CLOSE:
@@ -576,7 +666,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
             raw = t.getRecordingsList(start_date=start, end_date=end)
             return {"ok": True, "dates": rec_mod.parse_dates(raw)}
         try:
-            return await _to_thread(camera.with_retry, op)
+            return await _camera_query(f"dates:{start}:{end}", op)
         except Exception as e:
             raise _classify(e)
 
@@ -590,20 +680,22 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
             dates = rec_mod.parse_dates(raw)
             clips: list[dict] = []
             for d in dates:
-                try:
-                    rraw = t.getRecordings(d)
-                    clips.extend(c.to_json() for c in rec_mod.parse_clips(rraw, d))
-                except Exception:
-                    continue
+                rraw = t.getRecordings(d)
+                clips.extend(c.to_json() for c in rec_mod.parse_clips(rraw, d))
             return {"ok": True, "clips": clips, "dates": dates}
         try:
-            return await _to_thread(camera.with_retry, op)
+            return await _camera_query(f"all-recordings:{days}", op)
         except Exception as e:
             raise _classify(e)
 
     @app.get("/api/recordings/local")
     async def local_recordings():
-        return {"ok": True, "files": rec_mod.list_local(paths)}
+        valid = []
+        for row in rec_mod.list_local(paths):
+            duration = row["endTime"] - row["startTime"]
+            if await cached_media_is_valid(paths.recordings / row["date"] / row["file"], duration):
+                valid.append(row)
+        return {"ok": True, "files": valid}
 
     @app.get("/api/recordings/{date}")
     async def recordings_for_date(date: str):
@@ -611,7 +703,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
             raw = t.getRecordings(date)
             return {"ok": True, "clips": [c.to_json() for c in rec_mod.parse_clips(raw, date)]}
         try:
-            return await _to_thread(camera.with_retry, op)
+            return await _camera_query(f"recordings:{date}", op)
         except Exception as e:
             raise _classify(e)
 
@@ -622,10 +714,12 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         body = await req.json()
         clip = _parse_clip(body)
         out = paths.recording(clip)
-        was_cached = out.exists() and out.stat().st_size > 0
+        was_cached = await cached_media_is_valid(out, clip.duration)
+        if was_cached:
+            return {"ok": True, "file": f"/recordings/{clip.date}/{out.name}", "cached": True}
         try:
             await gateway.submit_download(
-                clip, download_runner(clip, paths, on_progress=hub.emit, operation="download")
+                clip, download_runner(clip, paths, on_progress=emit_event, operation="download")
             )
             return {"ok": True, "file": f"/recordings/{clip.date}/{out.name}",
                     "cached": was_cached}
@@ -638,14 +732,17 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
     async def stream_recording(date: str, start_time: int, end_time: int):
         clip = Clip(date, start_time, end_time)
         archived = paths.recording(clip)
-        out = archived if archived.exists() and archived.stat().st_size > 0 else paths.preview(clip)
-        if out.exists() and out.stat().st_size > 0:
+        preview = paths.preview(clip)
+        if await cached_media_is_valid(archived, clip.duration):
+            return FileResponse(archived, media_type="video/mp4")
+        out = archived if archived.exists() else preview
+        if await cached_media_is_valid(out, clip.duration):
             return FileResponse(out, media_type="video/mp4")
         try:
             await gateway.submit_playback(
                 clip,
                 download_runner(
-                    clip, paths, destination=out, on_progress=hub.emit, operation="playback"
+                    clip, paths, destination=out, on_progress=emit_event, operation="playback"
                 ),
             )
         except ApiError:
@@ -658,18 +755,43 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 
     @app.post("/api/recordings/play")
     async def play_recording(req: Request):
-        """Start a transient HLS stream and return after its first segment.
+        """Play a verified local recording, otherwise stream it from the camera.
 
-        Watching never writes into the recordings archive. The gateway keeps
-        the camera session serialized in the background until this one event
-        reaches its exact duration or the user cancels it.
+        A corrupt archive copy is atomically replaced before playback. A clip
+        that has never been downloaded remains a transient HLS camera stream.
         """
         body = await req.json()
         clip = _parse_clip(body)
+        archived = paths.recording(clip)
+        if await cached_media_is_valid(archived, clip.duration):
+            return {
+                "ok": True,
+                "url": f"/recordings/{clip.date}/{archived.name}",
+                "source": "local",
+            }
+        if archived.exists():
+            try:
+                await gateway.submit_download(
+                    clip,
+                    download_runner(
+                        clip, paths, on_progress=emit_event, operation="download"
+                    ),
+                    label=f"repair {clip.key}",
+                )
+            except ApiError:
+                raise
+            except Exception as e:
+                raise _classify(e)
+            return {
+                "ok": True,
+                "url": f"/recordings/{clip.date}/{archived.name}",
+                "source": "local",
+                "repaired": True,
+            }
         ready = asyncio.Event()
         future = gateway.submit_playback(
             clip,
-            playback_runner(clip, paths, ready, on_progress=hub.emit),
+            playback_runner(clip, paths, ready, on_progress=emit_event),
         )
         # The request returns at first-segment readiness while this Future
         # intentionally continues. Always observe its eventual exception;
@@ -691,7 +813,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
                 # clip may also finish before the scheduling turn sees ready.
                 await future
             if ready.is_set():
-                return {"ok": True, "url": playlist_url(clip)}
+                return {"ok": True, "url": playlist_url(clip), "source": "camera"}
             gateway.cancel_playback()
             raise ApiError(
                 Code.GATEWAY_TIMEOUT,
@@ -724,14 +846,14 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         if existing.exists() and existing.stat().st_size > 100:
             # Push readiness so the UI counts/badges update without polling —
             # disk-cached thumbs never go through the backfill queue's emit.
-            hub.emit({"type": "thumb", "key": clip.key, "status": "ready", "error": None})
+            emit_event({"type": "thumb", "key": clip.key, "status": "ready", "error": None})
             return FileResponse(existing, media_type="image/jpeg",
                                 headers={"X-Thumb-Status": "ready",
                                          "Cache-Control": "public, max-age=86400"})
         # Fast path: extract from cached recording without a camera pull.
         local = await extract_from_local(clip, paths)
         if local is not None:
-            hub.emit({"type": "thumb", "key": clip.key, "status": "ready", "error": None})
+            emit_event({"type": "thumb", "key": clip.key, "status": "ready", "error": None})
             return FileResponse(local, media_type="image/jpeg",
                                 headers={"X-Thumb-Status": "ready",
                                          "Cache-Control": "public, max-age=86400"})
@@ -747,7 +869,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         # learns it — including already-terminal (failed) thumbs, whose
         # backfill.request() early-returns without emitting. Without this, a
         # revisited date leaves those badges stuck at the default "queued".
-        hub.emit({"type": "thumb", "key": clip.key, "status": status, "error": st.get("error")})
+        emit_event({"type": "thumb", "key": clip.key, "status": status, "error": st.get("error")})
         return Response(
             content=_PLACEHOLDER,
             media_type="image/jpeg",
@@ -822,24 +944,29 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
                 clips.append(_parse_clip(c))
         elif body.get("date"):
             try:
-                t = await _to_thread(camera.get)
-                raw = await _to_thread(t.getRecordings, body["date"])
+                raw = await _camera_query(
+                    f"bulk-recordings:{body['date']}",
+                    lambda t: t.getRecordings(body["date"]),
+                )
                 clips = rec_mod.parse_clips(raw, body["date"])
             except Exception as e:
                 raise _classify(e)
         elif body.get("all"):
             days = int(body.get("days") or 30)
             try:
-                t = await _to_thread(camera.get)
                 end = datetime.now().strftime("%Y%m%d")
                 start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
-                raw = await _to_thread(t.getRecordingsList, start_date=start, end_date=end)
-                for d in rec_mod.parse_dates(raw):
-                    try:
-                        rraw = await _to_thread(t.getRecordings, d)
-                        clips.extend(rec_mod.parse_clips(rraw, d))
-                    except Exception:
-                        continue
+                dates = await _camera_query(
+                    f"bulk-dates:{start}:{end}",
+                    lambda t: rec_mod.parse_dates(t.getRecordingsList(
+                        start_date=start, end_date=end,
+                    )),
+                )
+                for d in dates:
+                    rraw = await _camera_query(
+                        f"bulk-recordings:{d}", lambda t, date=d: t.getRecordings(date)
+                    )
+                    clips.extend(rec_mod.parse_clips(rraw, d))
             except Exception as e:
                 raise _classify(e)
         if not clips:
@@ -876,7 +1003,9 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
             pending = gateway.cancel_playback()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
-        return {"ok": True, **cache_mod.clear(paths, target)}
+        result = cache_mod.clear(paths, target)
+        hub.emit(cache_event())
+        return {"ok": True, **result}
 
     # ── settings (camera dump + setters) ───────────────────────────────
 
@@ -884,8 +1013,9 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
     async def privacy(req: Request):
         body = await req.json()
         try:
-            t = await _to_thread(camera.get)
-            await _to_thread(t.setPrivacyMode, bool(body.get("enabled")))
+            await _camera_query(
+                "privacy", lambda t: t.setPrivacyMode(bool(body.get("enabled")))
+            )
             return {"ok": True}
         except Exception as e:
             raise _classify(e)
@@ -894,10 +1024,11 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
     async def camera_events(hours: int = 24):
         import time as _t
         try:
-            t = await _to_thread(camera.get)
             end = int(_t.time())
             start = end - hours * 3600
-            ev = await _to_thread(t.getEvents, startTime=start, endTime=end)
+            ev = await _camera_query(
+                f"events:{hours}", lambda t: t.getEvents(startTime=start, endTime=end)
+            )
             return {"ok": True, "events": ev}
         except Exception as e:
             raise _classify(e)
@@ -905,8 +1036,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
     @app.post("/api/camera/reboot")
     async def reboot():
         try:
-            t = await _to_thread(camera.get)
-            await _to_thread(t.reboot)
+            await _camera_query("reboot", lambda t: t.reboot())
             return {"ok": True}
         except Exception as e:
             raise _classify(e)

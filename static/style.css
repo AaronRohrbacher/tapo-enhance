@@ -299,6 +299,13 @@ input[type="date"] {
 }
 .clip-card .badge.ready { color: var(--green); border-color: var(--green); }
 .clip-card .badge.failed { color: var(--warn); border-color: var(--warn); }
+.clip-card .local-badge {
+  position: absolute; right: 4px; bottom: 4px;
+  padding: 2px 6px; border: 1px solid var(--green);
+  background: rgba(0, 20, 8, 0.9); color: var(--green);
+  font-size: 11px; letter-spacing: 1px;
+  box-shadow: 0 0 8px var(--glow);
+}
 .clip-card .badge.queued, .clip-card .badge.running {
   color: #b8ff7a; border-color: var(--fg-faint);
   animation: pulse 1.6s ease-in-out infinite;
@@ -327,23 +334,30 @@ input[type="date"] {
 .clip-card.downloading .meta { background: rgba(92, 209, 255, 0.08); }
 .clip-card.downloaded .meta { background: rgba(108, 212, 122, 0.05); }
 
-/* ── local list ── */
-.local-list { padding: 6px; }
-.local-row {
-  display: flex; gap: 12px; align-items: center; justify-content: space-between;
-  padding: 8px 12px; border-bottom: 1px solid var(--line);
-  cursor: pointer;
+/* ── local archive status ── */
+.dvr-sync-card { border-color: var(--line-bright); box-shadow: 0 0 14px rgba(41, 255, 92, 0.1); }
+.dvr-conversion-card { border-color: var(--line); }
+.dvr-sync-card .card-header { align-items: center; }
+.dvr-sync-status {
+  padding: 14px 12px 8px;
+  color: var(--fg-bright);
+  font-size: 16px;
+  letter-spacing: 1px;
+  text-shadow: 0 0 7px var(--glow);
 }
-.local-row:hover { background: var(--bg-elev-2); }
-.local-row:last-child { border-bottom: none; }
-.local-row .meta { color: var(--fg-dim); font-size: 11px; }
-
+.dvr-sync-card .status-line, .dvr-conversion-card .status-line { padding: 3px 12px 8px; }
+.dvr-overall-progress { padding: 0 12px 4px; }
+.dvr-overall-progress .progress { margin: 0; }
+.dvr-overall-progress .status-line { padding: 6px 0 2px; }
 /* ── cache ── */
 .cache-rows { padding: 8px 12px; }
 .cache-row {
-  display: grid; grid-template-columns: 1fr 100px 100px;
+  display: grid; grid-template-columns: minmax(260px, 1fr) 100px 100px;
+  align-items: center;
   padding: 4px 0; border-bottom: 1px dashed var(--line); font-size: 12px;
 }
+.cache-label { display: grid; gap: 2px; }
+.cache-label > .muted { font-size: 11px; }
 .cache-row.total { font-weight: 600; border-top: 1px solid var(--line); padding-top: 8px; }
 
 /* ── settings ── */
@@ -416,6 +430,8 @@ input[type="date"] {
   .topbar { flex-wrap: wrap; }
   .meta { width: 100%; justify-content: flex-end; }
   .config-form { grid-template-columns: 1fr; }
+  .cache-row { grid-template-columns: 1fr auto; gap: 4px 12px; }
+  .cache-row .cache-label { grid-column: 1 / -1; }
 }
 .discovery-results { display: grid; gap: .5rem; margin: .5rem 0; }
 .discovery-choice { text-align: left; width: 100%; }

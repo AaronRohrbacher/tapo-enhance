@@ -151,6 +151,7 @@ def test_list_local_returns_files_sorted_newest_first(tmp_path):
 
     rows = list_local(p)
     assert [r["date"] for r in rows] == ["20260102", "20260101"]
+    assert [r["key"] for r in rows] == ["20260102/2000/2020", "20260101/1000/1010"]
     assert all(r["path"].startswith("/recordings/") for r in rows)
 
 
@@ -165,6 +166,14 @@ def test_list_local_skips_non_mp4(tmp_path):
     p.ensure()
     (p.recordings / "20260101").mkdir()
     (p.recordings / "20260101" / "extra.txt").write_text("nope")
+    assert list_local(p) == []
+
+
+def test_list_local_skips_mp4_without_clip_timestamps(tmp_path):
+    p = Paths(tmp_path / "cache")
+    p.ensure()
+    (p.recordings / "20260101").mkdir()
+    (p.recordings / "20260101" / "unrelated.mp4").write_bytes(b"x")
     assert list_local(p) == []
 
 
