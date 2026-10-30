@@ -42,8 +42,11 @@ async def from_recent_segment(paths: Paths) -> bytes:
     try:
         data, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
     except asyncio.TimeoutError:
-        proc.kill()
         raise ApiError(Code.GATEWAY_TIMEOUT, "snapshot timeout", status=504)
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
     if not data:
         raise ApiError(Code.INTERNAL, "snapshot ffmpeg produced no bytes", status=502)
     return data

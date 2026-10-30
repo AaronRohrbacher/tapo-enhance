@@ -116,14 +116,40 @@
     const grid = $("#arch-grid");
     if (!grid) return;
     const clips = s.archive.clips;
-    const signature = JSON.stringify({
-      clips: clips.map((c) => `${c.date}/${c.startTime}/${c.endTime}`),
-      selected: Array.from(s.archive.selected).sort(),
-      thumbs: s.archive.thumbs,
-      downloads: s.downloads,
-      localKeys: Array.from(s.localKeys).sort(),
-    });
-    if (grid.dataset.signature === signature) return;
+    const signature = JSON.stringify(clips.map((c) => `${c.date}/${c.startTime}/${c.endTime}`));
+    if (grid.dataset.signature === signature && clips.length) {
+      // Keep image nodes intact while selection and download state change.
+      // Recreating the grid refetched every thumbnail on unrelated updates.
+      $("#btn-arch-bulk").disabled = s.archive.selected.size === 0;
+      grid.querySelectorAll(".clip-card").forEach((card, index) => {
+        const clip = clips[index];
+        const key = card.dataset.key;
+        const status = s.downloads[key] || (s.localKeys.has(key) ? "done" : "idle");
+        const thumb = s.archive.thumbs[key] || "idle";
+        card.classList.toggle("selected", s.archive.selected.has(key));
+        card.classList.toggle("downloading", status === "running");
+        card.classList.toggle("downloaded", status === "done");
+        card.classList.toggle("queued", status !== "running" && status !== "done" && ["queued", "running"].includes(thumb));
+        const badge = card.querySelector(".badge");
+        badge.className = `badge ${thumb}`;
+        badge.textContent = thumb === "idle" ? "waiting" : thumb;
+        const existing = card.querySelector(".local-badge");
+        if (status === "done" && !existing) {
+          const local = document.createElement("span");
+          local.className = "local-badge";
+          local.textContent = "DOWNLOADED ✓";
+          card.querySelector(".thumb-box").append(local);
+        } else if (status !== "done" && existing) existing.remove();
+        const button = card.querySelector("[data-action='download']");
+        button.disabled = status === "running" || status === "done";
+        button.textContent = status === "done" ? "downloaded" : "download";
+        const operation = s.operations[`download:${key}`];
+        card.querySelector(".meta-dur").textContent = status === "running" && operation
+          ? `${operation.message || operation.phase}${Number.isFinite(operation.progress) ? ` ${Math.round(operation.progress * 100)}%` : ""}`
+          : `${fmtDur(clip.endTime - clip.startTime)}${status === "running" ? " • downloading…" : status === "done" ? " • downloaded" : status === "failed" ? " • download failed" : ""}`;
+      });
+      return;
+    }
     grid.dataset.signature = signature;
     if (!clips.length) {
       grid.innerHTML = '<p class="placeholder">no clips for this date.</p>';
@@ -190,17 +216,57 @@
   function renderBulk(s) {
     const el = $("#arch-status");
     if (!el) return;
-    if (!s.bulk) {
-      el.classList.add("hidden");
+    const singles = Object.values(s.operations).filter((e) => e.operation === "download").map((e) => ({
+      id: e.key, total: 1, done: e.phase === "complete" ? 1 : 0,
+      failed: e.phase === "error" ? 1 : 0,
+      status: e.phase === "complete" ? "done" : e.phase === "error" ? "error" : e.phase === "cancelled" ? "cancelled" : "running",
+      message: `${e.message || e.phase} • ${e.key}`, progress: e.progress || 0,
+      errors: e.error ? [e.error] : [], finished: e.updated,
+    }));
+    const candidates = [...Object.values(s.jobs), ...singles];
+    const active = candidates.filter((j) => ["queued", "running", "cancelling"].includes(j.status));
+    $("#manual-sync-card").classList.toggle("hidden", !!s.dvrEnabled && !active.length);
+    const jobs = active.length ? active : candidates.sort((a, b) =>
+      (a.finished || a.started || 0) - (b.finished || b.started || 0)).slice(-1);
+    if (!jobs.length) {
+      el.textContent = "No sync running. Select recordings below to download.";
       return;
     }
-    el.classList.remove("hidden");
-    const j = s.bulk;
-    const pct = j.total ? Math.round(((j.done + j.failed) / j.total) * 100) : 0;
-    el.innerHTML = `
-      <div>bulk: ${j.done}/${j.total} done${j.failed ? ` • ${j.failed} failed` : ""}${j.current ? ` • ${j.current}` : ""}</div>
-      <div class="progress"><div class="fill" style="width: ${pct}%"></div></div>
-    `;
+    el.replaceChildren(...jobs.map((j) => {
+      const row = document.createElement("div");
+      const label = document.createElement("div");
+      const pct = Math.round(Math.max(0, Math.min(1, j.progress || 0)) * 100);
+      const active = ["queued", "running", "cancelling"].includes(j.status);
+      label.textContent = `${j.message || j.status} • ${j.done}/${j.total} ready` +
+        (j.failed ? ` • ${j.failed} failed` : "") + ` • ${pct}%`;
+      row.append(label);
+      const detail = document.createElement("div");
+      detail.className = "muted";
+      detail.textContent = [
+        j.download_current ? `Camera: ${j.download_current}` : "",
+        j.conversion_current ? `Converting ${j.conversion_current}` : "",
+        active && s.events.status !== "connected" ? "Progress connection lost; reconnecting…" : "",
+      ].filter(Boolean).join(" • ");
+      row.append(detail);
+      const progress = document.createElement("div");
+      progress.className = "progress";
+      progress.setAttribute("role", "progressbar");
+      progress.setAttribute("aria-label", "Manual sync progress");
+      progress.setAttribute("aria-valuemin", "0");
+      progress.setAttribute("aria-valuemax", "100");
+      progress.setAttribute("aria-valuenow", String(pct));
+      const fill = document.createElement("div");
+      fill.className = "fill";
+      fill.style.width = `${pct}%`;
+      progress.append(fill);
+      row.append(progress);
+      if (j.errors && j.errors.length) {
+        const errors = document.createElement("div");
+        errors.textContent = j.errors.join(" • ");
+        row.append(errors);
+      }
+      return row;
+    }));
   }
 
   function renderCache(s) {
@@ -232,12 +298,12 @@
     if (!el) return;
     if (!info) { el.innerHTML = '<p class="muted">load camera info first.</p>'; return; }
     el.innerHTML = `
-      <div class="info-row"><span class="label">alias</span><span>${info.alias}</span></div>
-      <div class="info-row"><span class="label">model</span><span>${info.model}</span></div>
-      <div class="info-row"><span class="label">firmware</span><span>${info.sw}</span></div>
-      <div class="info-row"><span class="label">hardware</span><span>${info.hw}</span></div>
-      <div class="info-row"><span class="label">mac</span><span>${info.mac}</span></div>
-      <div class="info-row"><span class="label">host</span><span>${info.host}</span></div>
+      <div class="info-row"><span class="label">alias</span><span>${escapeHtml(info.alias)}</span></div>
+      <div class="info-row"><span class="label">model</span><span>${escapeHtml(info.model)}</span></div>
+      <div class="info-row"><span class="label">firmware</span><span>${escapeHtml(info.sw)}</span></div>
+      <div class="info-row"><span class="label">hardware</span><span>${escapeHtml(info.hw)}</span></div>
+      <div class="info-row"><span class="label">mac</span><span>${escapeHtml(info.mac)}</span></div>
+      <div class="info-row"><span class="label">host</span><span>${escapeHtml(info.host)}</span></div>
     `;
   }
 
@@ -247,11 +313,14 @@
       .replace(/"/g, "&quot;");
   }
 
+  let renderedFeatures = null;
   function renderFeatures(s) {
     const status = $("#feature-status");
     const controls = $("#feature-controls");
     if (!status || !controls || !s.features) return;
     const f = s.features;
+    if (f === renderedFeatures) return;
+    renderedFeatures = f;
     if (f.loading) {
       status.innerHTML = '<p class="muted">reading supported features from camera…</p>';
       controls.innerHTML = "";

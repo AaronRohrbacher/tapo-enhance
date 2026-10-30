@@ -32,23 +32,63 @@ class ConversionQueue:
     def __init__(self, workers: int = 1):
         self._slots = asyncio.Semaphore(max(1, workers))
         self._tasks: set[asyncio.Task] = set()
+        self._by_output: dict[Path, asyncio.Task] = {}
+        self._listeners: dict[Path, list[tuple[Progress | None, str]]] = {}
+        self._latest: dict[Path, dict] = {}
 
     def submit(
         self, clip: Clip, paths: Paths, staged: Path, *,
         destination: Path | None = None, on_progress: Progress | None = None,
         operation: str = "download",
     ) -> asyncio.Task:
+        output = (destination or paths.recording(clip)).absolute()
+        existing = self._by_output.get(output)
+        if existing is not None and not existing.done():
+            self._listeners[output].append((on_progress, operation))
+            if output in self._latest:
+                _report(on_progress, {**self._latest[output], "operation": operation})
+            return existing
+        self._listeners[output] = [(on_progress, operation)]
+
+        def progress(event: dict) -> None:
+            self._latest[output] = event
+            for callback, listener_operation in self._listeners.get(output, []):
+                _report(callback, {**event, "operation": listener_operation})
+
         async def run() -> Path:
             async with self._slots:
+                if await cached_media_is_valid(output, clip.duration):
+                    progress({"type": "operation", "key": clip.key, "stage": "conversion",
+                              "phase": "complete", "progress": 1.0,
+                              "message": "Already available locally"})
+                    return output
                 return await convert_staged(
                     clip, paths, staged, destination=destination,
-                    on_progress=on_progress, operation=operation,
+                    on_progress=progress, operation=operation,
                 )
 
         task = asyncio.create_task(run(), name=f"convert-{clip.start}")
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._by_output[output] = task
+
+        def finished(completed: asyncio.Task) -> None:
+            self._tasks.discard(completed)
+            if self._by_output.get(output) is completed:
+                self._by_output.pop(output, None)
+                self._listeners.pop(output, None)
+                self._latest.pop(output, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finished)
         return task
+
+
+    async def stop(self) -> None:
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def make_fetch_runner(
@@ -59,11 +99,21 @@ def make_fetch_runner(
 
     async def runner(tapo: Any, cancel: asyncio.Event) -> Path:
         try:
+            out = paths.recording(clip)
+            if await cached_media_is_valid(out, clip.duration):
+                _report(on_progress, {"type": "operation", "operation": operation,
+                    "key": clip.key, "stage": "download", "phase": "downloaded",
+                    "message": "Already available locally", "progress": 1.0})
+                return out
+            staged = out.with_suffix(".download.ts")
+            if await cached_media_is_valid(staged, clip.duration):
+                return staged
             return await _fetch_staged(
                 tapo, clip, paths, deadline_overhead, cancel=cancel,
                 on_progress=on_progress, operation=operation,
             )
         except BaseException as exc:
+            paths.recording(clip).with_suffix(".download.tmp.ts").unlink(missing_ok=True)
             phase = "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
             message = "Operation cancelled" if phase == "cancelled" else (str(exc) or type(exc).__name__)
             _report(on_progress, {
@@ -95,6 +145,7 @@ def make_runner(
                 on_progress=on_progress, operation=operation,
             )
         except BaseException as exc:
+            (destination or paths.recording(clip)).with_suffix(".direct.tmp.mp4").unlink(missing_ok=True)
             if isinstance(exc, asyncio.CancelledError):
                 phase, message = "cancelled", "Operation cancelled"
             else:
@@ -131,6 +182,11 @@ async def _probe(path: Path) -> tuple[float, bool]:
         proc.kill()
         await proc.wait()
         raise ApiError(Code.FFMPEG_FAILED, "media validation timed out", status=502) from exc
+    except asyncio.CancelledError:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
+        raise
     if proc.returncode != 0:
         raise ApiError(
             Code.FFMPEG_FAILED, "download validation failed", status=502,
@@ -147,9 +203,9 @@ async def _probe(path: Path) -> tuple[float, bool]:
 
 async def cached_media_is_valid(path: Path, expected_duration: int) -> bool:
     """Return true only for a playable, substantially complete cached clip."""
-    if not path.exists() or path.stat().st_size <= 1024:
-        return False
     try:
+        if path.stat().st_size <= 1024:
+            return False
         duration, has_video = await _probe(path)
     except (ApiError, OSError):
         return False
@@ -167,7 +223,7 @@ async def _fetch_staged(
     out = paths.recording(clip)
     out.parent.mkdir(parents=True, exist_ok=True)
     staged = out.with_suffix(".download.ts")
-    staged.unlink(missing_ok=True)
+    partial = out.with_suffix(".download.tmp.ts")
     base = {"type": "operation", "operation": operation, "key": clip.key,
             "stage": "download"}
 
@@ -183,7 +239,7 @@ async def _fetch_staged(
         "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostats", "-y",
         "-fflags", "+genpts+discardcorrupt", "-f", "mpegts", "-i", "pipe:0",
         "-t", str(clip.duration), "-map", "0:v:0", "-map", "0:a:0?",
-        "-c", "copy", "-f", "mpegts", "-progress", "pipe:1", str(staged),
+        "-c", "copy", "-f", "mpegts", "-progress", "pipe:1", str(partial),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -254,8 +310,8 @@ async def _fetch_staged(
         except (asyncio.TimeoutError, Exception):
             pass
 
-    if not (staged.exists() and staged.stat().st_size > 1024):
-        staged.unlink(missing_ok=True)
+    if not (partial.exists() and partial.stat().st_size > 1024):
+        partial.unlink(missing_ok=True)
         raise ApiError(
             Code.DOWNLOAD_EMPTY,
             f"download produced no usable output (bytes={bytes_video}B, ffmpeg rc={ffmpeg.returncode})",
@@ -263,6 +319,9 @@ async def _fetch_staged(
             context={"ffmpeg_stderr_tail": stderr_tail.decode(errors="replace")[-500:],
                      "ts_bytes": bytes_video},
         )
+    if not await cached_media_is_valid(partial, clip.duration):
+        raise ApiError(Code.FFMPEG_FAILED, "downloaded recording is incomplete", status=502)
+    partial.replace(staged)
     report("downloaded", "Download complete; queued for conversion", progress=1.0)
     return staged
 
@@ -312,40 +371,54 @@ async def convert_staged(
                    mediaSeconds=round(seconds, 2), totalSeconds=clip.duration)
 
     progress_task = asyncio.create_task(read_progress())
-    assert ffmpeg.stderr is not None
-    while chunk := await ffmpeg.stderr.read(4096):
-        stderr_tail.extend(chunk)
-        if len(stderr_tail) > 8192:
-            del stderr_tail[:-8192]
-    await ffmpeg.wait()
-    await progress_task
+
+    async def finish() -> None:
+        assert ffmpeg.stderr is not None
+        while chunk := await ffmpeg.stderr.read(4096):
+            stderr_tail.extend(chunk)
+            if len(stderr_tail) > 8192:
+                del stderr_tail[:-8192]
+        await ffmpeg.wait()
+        await progress_task
+
     completed = False
     try:
+        try:
+            await asyncio.wait_for(finish(), timeout=max(60, clip.duration * 4 + 30))
+        except asyncio.TimeoutError as exc:
+            raise ApiError(Code.FFMPEG_FAILED, "video conversion timed out", status=502) from exc
         if ffmpeg.returncode != 0 or not (tmp.exists() and tmp.stat().st_size > 1024):
             raise ApiError(Code.FFMPEG_FAILED, "video conversion failed", status=502,
                            context={"ffmpeg_stderr_tail": stderr_tail.decode(errors="replace")[-500:]})
         duration, has_video = await _probe(tmp)
         if not has_video:
             raise ApiError(Code.DOWNLOAD_NO_VIDEO, "camera response contained no video", status=502)
+        tolerance = max(2.0, clip.duration * 0.1)
+        if duration < max(0.1, clip.duration - tolerance):
+            raise ApiError(Code.FFMPEG_FAILED, "downloaded recording is incomplete", status=502)
         tmp.replace(out)
         completed = True
         report("complete", "Event is ready", progress=1.0,
                mediaSeconds=round(duration, 2), totalSeconds=clip.duration)
         return out
     except asyncio.CancelledError:
-        # Keep the complete staged download so startup reconciliation can
-        # resume conversion without asking the camera for the clip again.
-        tmp.unlink(missing_ok=True)
+        report("cancelled", "Conversion cancelled; staged download preserved")
         raise
     except BaseException as exc:
-        tmp.unlink(missing_ok=True)
-        staged.unlink(missing_ok=True)
         message = str(exc) or type(exc).__name__
         report("error", message, error=message)
         raise
     finally:
+        if ffmpeg.returncode is None:
+            ffmpeg.kill()
+            await ffmpeg.wait()
+        if not progress_task.done():
+            progress_task.cancel()
+        await asyncio.gather(progress_task, return_exceptions=True)
         if completed:
             staged.unlink(missing_ok=True)
+        else:
+            tmp.unlink(missing_ok=True)
 
 
 async def _download(
@@ -374,7 +447,7 @@ async def _download(
         report("verifying", "Cached copy is corrupt; retrieving a replacement", progress=0.0)
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(".tmp.mp4")
+    tmp = out.with_suffix(".direct.tmp.mp4")
     tmp.unlink(missing_ok=True)
 
     report("connecting", "Opening a camera playback session", progress=0.0)
@@ -528,6 +601,10 @@ async def _download(
     # longer by timestamp offset or codec-frame rounding and is not evidence
     # that media beyond the requested event was written.
 
+    tolerance = max(2.0, clip.duration * 0.1)
+    if duration < max(0.1, clip.duration - tolerance):
+        tmp.unlink(missing_ok=True)
+        raise ApiError(Code.FFMPEG_FAILED, "downloaded recording is incomplete", status=502)
     tmp.replace(out)
     report(
         "complete", "Event is ready", progress=1.0, cached=False,

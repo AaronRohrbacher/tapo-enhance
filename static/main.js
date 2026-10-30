@@ -116,6 +116,9 @@
   }
 
   function applyDvr(data) {
+    state.dvrEnabled = !!data.enabled;
+    UI.renderBulk(state);
+    $(".dvr-sync-card").classList.toggle("hidden", !data.enabled);
     renderDvrWindow(data.retention_days, !!data.keep_forever);
     const local = data.available_days
       ? `Downloaded recordings: ${data.local_files} clip${data.local_files === 1 ? "" : "s"} across ${data.available_days} day${data.available_days === 1 ? "" : "s"}.`
@@ -178,10 +181,12 @@
     return `${hours}h ${minutes % 60}m`;
   }
 
+  let dvrFormDirty = false;
+  $("#dvr-settings-form").addEventListener("input", () => { dvrFormDirty = true; });
   async function loadDvr() {
     const r = await API.get("/api/dvr");
     if (r.ok) {
-      hydrateDvrForm(r.data);
+      if (!dvrFormDirty) hydrateDvrForm(r.data);
       applyDvr(r.data);
     }
     else $("#dvr-availability").textContent = "DVR status unavailable: " + r.error;
@@ -254,7 +259,10 @@
   // per-thumbnail HEADs — idle means zero traffic.
   function openEvents() {
     const es = new EventSource("/api/events");
-    es.onopen = () => { state.events = { status: "connected", error: null }; };
+    es.onopen = () => {
+      state.events = { status: "connected", error: null };
+      UI.renderBulk(state);
+    };
     es.onmessage = (e) => {
       let evt;
       try { evt = JSON.parse(e.data); }
@@ -268,16 +276,19 @@
       else if (evt.type === "operation") applyOperation(evt);
       else if (evt.type === "dvr") applyDvr(evt);
       else if (evt.type === "cache") applyCache(evt.usage);
+      else if (evt.type === "job") applyJob(evt.job);
     };
     es.onerror = () => {
       state.events = { status: "reconnecting", error: "Progress connection lost; reconnecting" };
       UI.renderGateway(state);
+      UI.renderBulk(state);
     };
   }
 
   function applyOperation(evt) {
     const id = `${evt.operation}:${evt.key}`;
-    state.operations[id] = evt;
+    if (state.operations[id] && evt.updated && state.operations[id].updated > evt.updated) return;
+    state.operations[id] = { ...evt, updated: evt.updated || Date.now() / 1000 };
     const pct = Number.isFinite(evt.progress) ? ` ${Math.round(evt.progress * 100)}%` : "";
     const message = (evt.message || evt.phase || "working") + pct;
 
@@ -286,16 +297,18 @@
       state.player.status = evt.phase === "error" ? "error" : evt.phase === "complete" ? "ready" : "loading";
       if (evt.phase === "error") toast("playback failed: " + (evt.error || message), "error");
     } else if (evt.operation === "download") {
-      state.downloads[evt.key] = evt.phase === "complete" ? "done" : evt.phase === "error" ? "failed" : "running";
+      state.downloads[evt.key] = evt.phase === "complete" ? "done" : ["error", "cancelled"].includes(evt.phase) ? "failed" : "running";
       const card = $(`.clip-card[data-key="${CSS.escape(evt.key)}"]`);
       const meta = card && card.querySelector(".meta-dur");
       if (meta) meta.textContent = message;
-    } else if (evt.operation === "dvr") {
+      UI.renderBulk(state);
+    } else if (evt.operation === "dvr" || evt.operation === "bulk") {
       if (evt.phase === "complete") {
-        set((s) => { s.localKeys.add(evt.key); });
+        set((s) => { s.localKeys.add(evt.key); s.downloads[evt.key] = "done"; });
       }
       if (evt.phase === "error") toast("DVR sync: " + (evt.error || message), "error");
     } else if (evt.operation === "live") {
+      if (state.live.status === "idle" || state.live.status === "stopping") return;
       if (evt.phase === "error") {
         state.live.status = "error";
         state.live.error = evt.error || evt.message;
@@ -440,7 +453,9 @@
     const url = r.data.url;
     const alreadyAttached = state.live.url === url && hls;
     set((s) => { s.live.status = "running"; s.live.url = url; s.live.error = null; });
-    if (!alreadyAttached) setTimeout(() => attachHls(url), 250);
+    if (!alreadyAttached) setTimeout(() => {
+      if (requestGeneration === liveRequestGeneration && state.live.url === url) attachHls(url);
+    }, 250);
   });
 
   async function stopLive({ sound = true } = {}) {
@@ -479,6 +494,7 @@
       const res = await fetch("/api/snapshot?t=" + Date.now());
       if (res.ok) {
         const blob = await res.blob();
+        if (img.src.startsWith("blob:")) URL.revokeObjectURL(img.src);
         img.src = URL.createObjectURL(blob);
         img.classList.remove("hidden");
         toast("snapshot captured", "success");
@@ -529,7 +545,7 @@
     panel.innerHTML = '<span class="muted">loading…</span>';
     const r = await API.get("/api/recordings/dates");
     if (!r.ok) {
-      panel.innerHTML = `<span class="muted">${r.error}</span>`;
+      panel.textContent = r.error;
       if (r.retryable) toast(r.error, "error");
       return;
     }
@@ -549,8 +565,11 @@
     });
   }
 
+  let archiveRequest = 0;
   async function loadDate(date) {
+    const request = ++archiveRequest;
     const r = await API.get(`/api/recordings/${date}`);
+    if (request !== archiveRequest) return;
     if (!r.ok) {
       toast("could not show camera recordings: " + r.error, "error");
       return;
@@ -559,7 +578,8 @@
       s.archive.date = date;
       s.archive.clips = r.data.clips || [];
       s.archive.selected = new Set();
-      s.archive.thumbs = {};
+      const keys = new Set(s.archive.clips.map(clipKey));
+      s.archive.thumbs = Object.fromEntries(Object.entries(s.archive.thumbs).filter(([key]) => keys.has(key)));
       s.archive.thumbErrors = {};
       s.archive.thumbCounts = { total: 0, idle: 0, ready: 0, queued: 0, running: 0, failed: 0 };
     });
@@ -569,13 +589,17 @@
   }
 
   async function loadAll() {
+    const request = ++archiveRequest;
     const r = await API.get("/api/recordings/all?days=30");
+    if (request !== archiveRequest) return;
     if (!r.ok) { toast(r.error, "error"); return; }
     set((s) => {
       s.archive.date = "*";
       s.archive.clips = (r.data.clips || []).sort((a, b) => b.startTime - a.startTime);
       s.archive.selected = new Set();
-      s.archive.thumbs = {};
+      const keys = new Set(s.archive.clips.map(clipKey));
+      s.archive.thumbs = Object.fromEntries(Object.entries(s.archive.thumbs).filter(([key]) => keys.has(key)));
+      s.archive.thumbErrors = {};
     });
     refreshThumbCounts();
   }
@@ -590,12 +614,17 @@
     });
   });
 
+  let submittingBulk = false;
   $("#btn-arch-bulk").addEventListener("click", async () => {
+    if (submittingBulk) return;
     const clips = state.archive.clips.filter((c) => state.archive.selected.has(clipKey(c)));
     if (!clips.length) return;
+    submittingBulk = true;
     const r = await API.post("/api/recordings/bulk", { clips });
+    submittingBulk = false;
     if (!r.ok) { toast(r.error, "error"); return; }
-    pollBulk(r.data.job_id, r.data.total);
+    // SSE can arrive before the POST response; keep the newer pushed snapshot.
+    if (!state.jobs[r.data.job_id]) applyJob(r.data.job);
   });
 
   $("#arch-grid").addEventListener("click", (ev) => {
@@ -619,15 +648,19 @@
 
   async function downloadClip(clip) {
     const k = clipKey(clip);
+    applyOperation({ type: "operation", operation: "download", key: k, phase: "queued", message: "Waiting for camera access", progress: 0 });
     set((s) => { s.downloads[k] = "running"; });
     SFX.transfer();
     const r = await API.post("/api/recordings/download", clip);
     if (r.ok) {
-      set((s) => { s.downloads[k] = "done"; });
+      applyOperation({ type: "operation", operation: "download", key: k,
+        phase: "complete", message: "Download complete", progress: 1 });
+      set((s) => { s.downloads[k] = "done"; s.localKeys.add(k); });
       SFX.done();
       toast(`saved ${clip.date} • ${formatHMS(clip.startTime)}`, "success");
-      loadLocalRecordings();
     } else {
+      applyOperation({ type: "operation", operation: "download", key: k,
+        phase: "error", message: "Download failed", error: r.error });
       set((s) => { s.downloads[k] = "failed"; });
       SFX.denied();
       toast("download failed: " + r.error, "error");
@@ -721,23 +754,16 @@
     set((s) => { s.player.clip = null; s.player.status = "idle"; });
   });
 
-  // ── bulk poll ────────────────────────────────────────────────────────
-  let bulkTimer = null;
-  async function pollBulk(jobId, total) {
-    clearTimeout(bulkTimer);
-    const r = await API.get(`/api/jobs/${jobId}`);
-    if (!r.ok) {
-      toast("bulk job lost: " + r.error, "error");
-      set((s) => { s.bulk = null; });
-      return;
-    }
-    set((s) => { s.bulk = r.data.job; });
-    if (r.data.job.status === "running" || r.data.job.status === "cancelling") {
-      bulkTimer = setTimeout(() => pollBulk(jobId, total), 1500);
-    } else {
-      toast(`bulk ${r.data.job.status}: ${r.data.job.done} ok / ${r.data.job.failed} failed`, r.data.job.failed ? "error" : "success");
-      setTimeout(() => set((s) => { s.bulk = null; }), 5000);
-      loadLocalRecordings();
+  // Manual sync shares the single server-pushed progress connection.
+  function applyJob(job) {
+    if (!job) return;
+    const previous = state.jobs[job.id];
+    if (previous && previous.revision >= job.revision) return;
+    state.jobs[job.id] = job;
+    UI.renderBulk(state);
+    if (previous && previous.status !== job.status && ["done", "cancelled", "error"].includes(job.status)) {
+      toast(`${job.message}: ${job.done} ready / ${job.failed} failed`,
+        job.failed || job.status === "error" ? "error" : "success");
     }
   }
 
@@ -745,7 +771,12 @@
   // and includes files downloaded by unattended DVR syncs.
   async function loadLocalRecordings() {
     const r = await API.get("/api/recordings/local");
-    if (r.ok) set((s) => { s.localKeys = new Set(r.data.files.map((file) => file.key)); });
+    if (r.ok) set((s) => {
+      s.localKeys = new Set(r.data.files.map((file) => file.key));
+      Object.entries(s.downloads).forEach(([key, status]) => {
+        if (status === "done" && !s.localKeys.has(key)) delete s.downloads[key];
+      });
+    });
     return r;
   }
 
@@ -771,6 +802,11 @@
       if (!r.ok) { toast(r.error, "error"); return; }
       toast(`purged ${target}: ${r.data.removed_files} files`, "success");
       if (target === "recordings" || target === "all") loadLocalRecordings();
+      if (target === "thumbs" || target === "all") {
+        $("#arch-grid").dataset.signature = "";
+        set((s) => { s.archive.thumbs = {}; s.archive.thumbErrors = {}; });
+        refreshThumbCounts();
+      }
     });
   });
 
@@ -944,6 +980,7 @@
     });
     status.textContent = r.ok ? "saved" : "failed: " + r.error;
     if (r.ok) {
+      dvrFormDirty = false;
       hydrateDvrForm(r.data);
       applyDvr(r.data);
       toast("DVR settings saved", "success");

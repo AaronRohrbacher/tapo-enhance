@@ -105,3 +105,39 @@ async def test_media_timeout_reaps_pending_io():
     with pytest.raises(TimeoutError):
         await media_wait(stalled(), asyncio.Event(), timeout=0.01)
     assert cleaned.is_set()
+
+
+@pytest.mark.parametrize("operation", ["probe", "snapshot", "thumbnail"])
+async def test_cancelled_media_helpers_reap_their_subprocess(paths, monkeypatch, operation):
+    """Cancellation must reap the actual OS process, not just its Python task."""
+    from srv import downloader, snapshot, thumbs
+    entered = asyncio.Event()
+    processes = []
+    spawn = asyncio.create_subprocess_exec
+
+    async def long_running_process(*args, **kwargs):
+        proc = await spawn("ffmpeg", "-hide_banner", "-loglevel", "error", "-re",
+                           "-f", "lavfi", "-i", "testsrc=s=16x16:r=1", "-f", "null", "-",
+                           stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        processes.append(proc)
+        entered.set()
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", long_running_process)
+    if operation == "probe":
+        work = downloader._probe(paths.recording(CLIP))
+    elif operation == "snapshot":
+        (paths.stream / "seg_00001.ts").write_bytes(b"x" * 8192)
+        work = snapshot.from_recent_segment(paths)
+    else:
+        source = paths.recording(CLIP)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"x" * 2048)
+        work = thumbs.extract_from_local(CLIP, paths)
+    task = asyncio.create_task(work)
+    await asyncio.wait_for(entered.wait(), 2)
+    assert processes[0].returncode is None
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    assert processes[0].returncode is not None

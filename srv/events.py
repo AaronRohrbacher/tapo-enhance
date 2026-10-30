@@ -32,13 +32,16 @@ class EventHub:
         self._subs.discard(q)
 
     def emit(self, event: dict) -> None:
-        # Fan out without blocking. A full queue means a stuck consumer — drop
-        # the event for that subscriber rather than stall the whole gateway.
+        # A lagging client reconnects for snapshots; silently dropping a final
+        # progress event would leave it displaying a running job forever.
         for q in list(self._subs):
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
-                pass
+                while not q.empty():
+                    q.get_nowait()
+                q.put_nowait(self.CLOSE)
+                self._subs.discard(q)
 
     def close(self) -> None:
         """End every SSE subscription without waiting for client disconnects."""

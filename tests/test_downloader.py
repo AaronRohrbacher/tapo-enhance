@@ -154,3 +154,85 @@ async def test_serialises_two_different_downloads(fake_media_tapo, paths):
         assert len(fake_media_tapo.sessions) == 2
     finally:
         await g.stop()
+
+
+async def test_partial_recording_is_never_published(fake_media_tapo, paths):
+    clip = Clip("20990101", 1700000000, 1700000016)
+    with pytest.raises(ApiError, match="incomplete"):
+        await _run_via_gateway(fake_media_tapo, clip, paths)
+    assert not paths.recording(clip).exists()
+
+
+async def test_partial_staged_download_is_not_marked_resumable(fake_media_tapo, paths):
+    from srv.downloader import make_fetch_runner
+    clip = Clip("20990101", 1700000000, 1700000016)
+    with pytest.raises(ApiError, match="incomplete"):
+        await make_fetch_runner(clip, paths)(fake_media_tapo, asyncio.Event())
+    assert not paths.recording(clip).with_suffix(".download.ts").exists()
+
+
+async def test_conversion_cancellation_reaps_ffmpeg_and_preserves_staged(paths, make_av_ts, monkeypatch):
+    import srv.downloader as module
+    staged = paths.recording(CLIP).with_suffix(".download.ts")
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    make_av_ts(staged)
+    created = asyncio.Event()
+    processes = []
+    spawn = asyncio.create_subprocess_exec
+
+    async def slow_encoder(*args, **kwargs):
+        # A real long-running encoder makes process lifetime observable.
+        process = await spawn("ffmpeg", "-hide_banner", "-loglevel", "error", "-re",
+                              "-stream_loop", "-1", "-i", str(staged), "-f", "null", "-",
+                              stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        processes.append(process)
+        created.set()
+        return process
+
+    monkeypatch.setattr(module.asyncio, "create_subprocess_exec", slow_encoder)
+    task = asyncio.create_task(module.convert_staged(CLIP, paths, staged))
+    await asyncio.wait_for(created.wait(), 2)
+    assert processes[0].returncode is None
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    assert processes[0].returncode is not None
+    assert staged.exists()
+    assert not paths.recording(CLIP).with_suffix(".tmp.mp4").exists()
+
+
+async def test_overlapping_conversion_requests_share_one_encoder_and_progress(
+    fake_media_tapo, paths,
+):
+    from srv.downloader import ConversionQueue, make_fetch_runner
+    staged = await make_fetch_runner(CLIP, paths)(fake_media_tapo, asyncio.Event())
+    queue = ConversionQueue()
+    a, b = [], []
+    first = queue.submit(CLIP, paths, staged, on_progress=a.append, operation="bulk")
+    second = queue.submit(CLIP, paths, staged, on_progress=b.append, operation="dvr")
+    assert first is second
+    result = await first
+    assert result.exists()
+    assert a[-1]["phase"] == b[-1]["phase"] == "complete"
+    assert {e["operation"] for e in a} == {"bulk"}
+    assert {e["operation"] for e in b} == {"dvr"}
+    assert len(fake_media_tapo.sessions) == 1
+    await queue.stop()
+
+
+async def test_overlapping_fetch_and_single_download_return_their_actual_formats(
+    fake_media_tapo, paths, ffprobe_streams,
+):
+    from srv.downloader import make_fetch_runner
+    gateway = CameraGateway(get_tapo=lambda: fake_media_tapo)
+    await gateway.start()
+    try:
+        fetch = gateway.submit_fetch(CLIP, make_fetch_runner(CLIP, paths))
+        download = gateway.submit_download(CLIP, make_runner(CLIP, paths))
+        staged, finished = await asyncio.gather(fetch, download)
+        assert staged.suffix == ".ts"
+        assert finished == paths.recording(CLIP)
+        assert finished.suffix == ".mp4"
+        assert {s["codec_name"] for s in ffprobe_streams(finished)} >= {"h264", "aac"}
+    finally:
+        await gateway.stop()

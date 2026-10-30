@@ -409,7 +409,7 @@ class DvrService:
         self._emit()
         for clip, task in conversions:
             try:
-                await task
+                await asyncio.shield(task)
                 downloaded += 1
                 self._sync_complete += 1
                 self._sync_work[clip.key] = (1.0, 1.0)

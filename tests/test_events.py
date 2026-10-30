@@ -23,14 +23,16 @@ async def test_unsubscribe_stops_delivery():
     assert hub.subscriber_count == 0
 
 
-async def test_full_queue_drops_without_blocking_producer():
-    # A stuck consumer must never stall the gateway. Excess events drop for
-    # that subscriber only; emit() always returns immediately.
+async def test_full_queue_disconnects_lagging_subscriber_for_snapshot_replay():
     hub = EventHub(max_queue=1)
-    a = hub.subscribe()
+    a, healthy = hub.subscribe(), hub.subscribe()
     hub.emit({"n": 1})
-    hub.emit({"n": 2})  # dropped — queue full, no exception
-    assert await a.get() == {"n": 1}
+    assert await healthy.get() == {"n": 1}
+    hub.emit({"n": 2})
+    assert await a.get() is EventHub.CLOSE
+    assert await healthy.get() == {"n": 2}
+    assert hub.subscriber_count == 1
+    hub.emit({"n": 3})
     assert a.empty()
 
 

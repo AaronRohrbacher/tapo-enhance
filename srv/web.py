@@ -15,6 +15,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -131,6 +132,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         settings, tapo_factory=tapo_factory, rediscover=_rediscover_ip
     )
     hub = EventHub()
+    recent_operations: dict[tuple[str, str], dict] = {}
     cache_push_handle: asyncio.TimerHandle | None = None
     last_cache_push = 0.0
 
@@ -153,6 +155,13 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         cache_push_handle = loop.call_later(delay, push_cache)
 
     def emit_event(event: dict) -> None:
+        if event.get("type") == "operation" and event.get("operation") == "download":
+            event = {**event, "updated": time.time()}
+            key = (event["operation"], event["key"])
+            recent_operations.pop(key, None)
+            recent_operations[key] = event
+            while len(recent_operations) > 100:
+                recent_operations.pop(next(iter(recent_operations)))
         hub.emit(event)
         changed = (
             event.get("type") == "thumb" and event.get("status") in {"ready", "failed"}
@@ -179,7 +188,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
     )
     backfill = ThumbBackfill(paths, gateway, on_event=emit_event)
     conversions = ConversionQueue()
-    jobs = JobRegistry(paths, gateway, conversions)
+    jobs = JobRegistry(paths, gateway, conversions, on_event=emit_event)
     dvr = DvrService(
         settings, paths, camera.with_retry, gateway, on_event=emit_event,
         conversions=conversions,
@@ -200,7 +209,12 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
             await gateway.detach_live()
             await backfill.stop()
             await dvr.stop()
+            await jobs.stop()
             await gateway.stop()
+            await conversions.stop()
+            if cache_push_handle is not None:
+                cache_push_handle.cancel()
+            hub.close()
 
     root = Path(__file__).parent.parent
     static_dir = root / "static"
@@ -297,7 +311,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 
     @app.post("/api/dvr")
     async def configure_dvr(req: Request):
-        body = await req.json()
+        body = await _request_body(req)
         enabled = body.get("enabled", False)
         keep_forever = body.get("keep_forever", False)
         interval = body.get("interval_minutes", 1440)
@@ -377,7 +391,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 
     @app.post("/api/config")
     async def configure(req: Request):
-        body = await req.json()
+        body = await _request_body(req)
         host = str(body.get("host") or "").strip()
         user = str(body.get("user") or "admin").strip()
         password = str(body.get("password") or "")
@@ -589,7 +603,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 
     @app.post("/api/camera/feature/{name}")
     async def set_camera_feature(name: str, req: Request):
-        body = await req.json()
+        body = await _request_body(req)
         boolean_setters = {
             "led": ("setLEDEnabled", {}),
             "motion": ("setMotionDetection", {"enabled": None}),
@@ -632,15 +646,23 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         (2s) and per-thumbnail HEAD (1.5s) polling loops — clients receive an
         event only when state actually changes, so idle == no traffic."""
         q = hub.subscribe()
+        # Freeze every snapshot before the first yield. Events queued after
+        # this point are newer; replay cannot overwrite a newer snapshot.
+        initial = [gateway.status(), cache_event(), {"type": "dvr", **dvr.config()}]
+        initial.extend(list(recent_operations.values()))
+        initial.extend({"type": "job", "job": job.to_dict()} for job in jobs.list())
+        initial.extend(backfill.snapshot())
 
         async def gen():
             try:
-                # Send the current gateway snapshot immediately so a freshly
-                # connected UI is correct without waiting for the next change.
-                yield f"data: {json.dumps(gateway.status())}\n\n"
-                yield f"data: {json.dumps(cache_event())}\n\n"
+                for event in initial:
+                    yield f"data: {json.dumps(event)}\n\n"
                 while True:
-                    evt = await q.get()
+                    try:
+                        evt = await asyncio.wait_for(q.get(), timeout=15)
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"
+                        continue
                     if evt is EventHub.CLOSE:
                         return
                     yield f"data: {json.dumps(evt)}\n\n"
@@ -673,6 +695,8 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
     @app.get("/api/recordings/all")
     async def all_recordings(days: int = 30):
         end = datetime.now().strftime("%Y%m%d")
+        if not 1 <= days <= 36500:
+            raise ApiError(Code.BAD_REQUEST, "days must be between 1 and 36500", status=400)
         start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
 
         def op(t):
@@ -699,6 +723,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 
     @app.get("/api/recordings/{date}")
     async def recordings_for_date(date: str):
+        _validate_date(date)
         def op(t):
             raw = t.getRecordings(date)
             return {"ok": True, "clips": [c.to_json() for c in rec_mod.parse_clips(raw, date)]}
@@ -711,7 +736,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 
     @app.post("/api/recordings/download")
     async def download(req: Request):
-        body = await req.json()
+        body = await _request_body(req)
         clip = _parse_clip(body)
         out = paths.recording(clip)
         was_cached = await cached_media_is_valid(out, clip.duration)
@@ -730,7 +755,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 
     @app.get("/api/recordings/stream/{date}/{start_time}/{end_time}")
     async def stream_recording(date: str, start_time: int, end_time: int):
-        clip = Clip(date, start_time, end_time)
+        clip = _parse_clip({"date": date, "startTime": start_time, "endTime": end_time})
         archived = paths.recording(clip)
         preview = paths.preview(clip)
         if await cached_media_is_valid(archived, clip.duration):
@@ -760,7 +785,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         A corrupt archive copy is atomically replaced before playback. A clip
         that has never been downloaded remains a transient HLS camera stream.
         """
-        body = await req.json()
+        body = await _request_body(req)
         clip = _parse_clip(body)
         archived = paths.recording(clip)
         if await cached_media_is_valid(archived, clip.duration):
@@ -841,7 +866,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 
     @app.api_route("/api/thumb/{date}/{start_time}/{end_time}", methods=["GET", "HEAD"])
     async def thumb_endpoint(date: str, start_time: int, end_time: int):
-        clip = Clip(date, start_time, end_time)
+        clip = _parse_clip({"date": date, "startTime": start_time, "endTime": end_time})
         existing = paths.thumb(clip)
         if existing.exists() and existing.stat().st_size > 100:
             # Push readiness so the UI counts/badges update without polling —
@@ -897,7 +922,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 
     @app.get("/api/preview/{date}/{start_time}/{end_time}")
     async def get_preview(date: str, start_time: int, end_time: int):
-        clip = Clip(date, start_time, end_time)
+        clip = _parse_clip({"date": date, "startTime": start_time, "endTime": end_time})
         p = paths.preview(clip)
         if p.exists() and p.stat().st_size > 1024:
             return FileResponse(p, media_type="video/mp4")
@@ -937,12 +962,15 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 
     @app.post("/api/recordings/bulk")
     async def bulk(req: Request):
-        body = await req.json()
+        body = await _request_body(req)
         clips: list[Clip] = []
         if body.get("clips"):
+            if not isinstance(body["clips"], list):
+                raise ApiError(Code.BAD_REQUEST, "clips must be a list", status=400)
             for c in body["clips"]:
                 clips.append(_parse_clip(c))
         elif body.get("date"):
+            _validate_date(body["date"])
             try:
                 raw = await _camera_query(
                     f"bulk-recordings:{body['date']}",
@@ -952,7 +980,12 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
             except Exception as e:
                 raise _classify(e)
         elif body.get("all"):
-            days = int(body.get("days") or 30)
+            try:
+                days = int(body.get("days", 30))
+                if not 1 <= days <= 36500:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError):
+                raise ApiError(Code.BAD_REQUEST, "days must be between 1 and 36500", status=400)
             try:
                 end = datetime.now().strftime("%Y%m%d")
                 start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
@@ -972,7 +1005,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         if not clips:
             raise ApiError(Code.BAD_REQUEST, "no clips to download", status=400)
         job = jobs.submit_bulk(clips)
-        return {"ok": True, "job_id": job.id, "total": job.total}
+        return {"ok": True, "job_id": job.id, "total": job.total, "job": job.to_dict()}
 
     @app.get("/api/jobs/{job_id}")
     async def job_status(job_id: str):
@@ -995,8 +1028,10 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 
     @app.post("/api/cache/clear")
     async def cache_clear(req: Request):
-        body = await req.json()
-        target = (body.get("target") or "").lower()
+        body = await _request_body(req)
+        if not isinstance(body.get("target"), str):
+            raise ApiError(Code.BAD_REQUEST, "cache target must be a string", status=400)
+        target = body["target"].lower()
         if target in ("stream", "all"):
             await gateway.detach_live()
         if target in ("playback", "all"):
@@ -1011,10 +1046,12 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 
     @app.post("/api/camera/privacy")
     async def privacy(req: Request):
-        body = await req.json()
+        body = await _request_body(req)
+        if not isinstance(body.get("enabled"), bool):
+            raise ApiError(Code.BAD_REQUEST, "enabled must be a boolean", status=400)
         try:
             await _camera_query(
-                "privacy", lambda t: t.setPrivacyMode(bool(body.get("enabled")))
+                "privacy", lambda t: t.setPrivacyMode(body["enabled"])
             )
             return {"ok": True}
         except Exception as e:
@@ -1057,15 +1094,44 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 # ── helpers ────────────────────────────────────────────────────────────────
 
 
+async def _request_body(req: Request) -> dict:
+    try:
+        body = await req.json()
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ApiError(Code.BAD_REQUEST, "request body must be valid JSON", status=400) from exc
+    if not isinstance(body, dict):
+        raise ApiError(Code.BAD_REQUEST, "request body must be a JSON object", status=400)
+    return body
+
+
+def _validate_date(date: str) -> str:
+    try:
+        if not isinstance(date, str) or len(date) != 8 or not date.isascii() or not date.isdigit():
+            raise ValueError
+        datetime.strptime(date, "%Y%m%d")
+    except (TypeError, ValueError):
+        raise ApiError(Code.BAD_REQUEST, "date must be a valid YYYYMMDD date", status=400)
+    return date
+
+
 def _parse_clip(body: dict) -> Clip:
     try:
-        date = str(body.get("date") or "")
-        start = int(body["startTime"])
-        end = int(body["endTime"])
-    except (KeyError, TypeError, ValueError) as e:
+        if not isinstance(body, dict):
+            raise ValueError("clip must be an object")
+        date = body.get("date") or ""
+        values = (body["startTime"], body["endTime"])
+        if any(isinstance(v, (bool, float)) for v in values):
+            raise ValueError("timestamps must be integers")
+        start, end = (int(v) for v in values)
+        if not 0 <= start < end:
+            raise ValueError("endTime must be greater than startTime")
+        start_date = datetime.fromtimestamp(start)
+        datetime.fromtimestamp(end)
+        if not date:
+            date = start_date.strftime("%Y%m%d")
+    except (KeyError, TypeError, ValueError, OverflowError, OSError) as e:
         raise ApiError(Code.BAD_REQUEST, f"bad clip body: {e}", status=400)
-    if not date:
-        date = datetime.fromtimestamp(start).strftime("%Y%m%d")
+    _validate_date(date)
     return Clip(date, start, end)
 
 

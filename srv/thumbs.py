@@ -60,8 +60,11 @@ async def extract_from_local(clip: Clip, paths: Paths) -> Path | None:
             try:
                 rc = await asyncio.wait_for(proc.wait(), timeout=15)
             except asyncio.TimeoutError:
-                proc.kill()
                 rc = -1
+            finally:
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
             if rc == 0 and tmp.exists() and tmp.stat().st_size > 100:
                 tmp.replace(out)
                 return out
@@ -124,20 +127,20 @@ class ThumbBackfill:
         self._task: asyncio.Task | None = None
         self._on_event = on_event
 
-    def _emit(self, key: str) -> None:
-        """Push this clip's current thumb status (replaces the per-thumbnail
-        HEAD poll the frontend used to run)."""
-        if self._on_event is None:
-            return
+    def _event(self, key: str) -> dict:
         st = self._state.get(key) or {}
-        self._on_event({
-            "type": "thumb",
-            "key": key,
-            "status": st.get("status"),
-            "error": st.get("error"),
-            "message": st.get("message"),
+        return {
+            "type": "thumb", "key": key, "status": st.get("status"),
+            "error": st.get("error"), "message": st.get("message"),
             "attempt": st.get("attempts", 0),
-        })
+        }
+
+    def snapshot(self) -> list[dict]:
+        return [self._event(key) for key in self._state]
+
+    def _emit(self, key: str) -> None:
+        if self._on_event is not None:
+            self._on_event(self._event(key))
 
     def state(self, key: str) -> dict | None:
         return self._state.get(key)

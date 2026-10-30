@@ -111,6 +111,10 @@
 
     <!-- ARCHIVE -->
     <section id="tab-archive" class="tab-content">
+      <div class="card" id="manual-sync-card">
+        <div class="card-header">sync status</div>
+        <div id="arch-status" class="status-line" role="status" aria-live="polite">No sync running. Select recordings below to download.</div>
+      </div>
       <div class="card dvr-sync-card">
         <div class="card-header">
           <span>automatic downloads (DVR)</span>
@@ -146,7 +150,6 @@
           <button id="btn-arch-bulk" class="btn" disabled>download selected</button>
         </div>
         <div id="arch-dates" class="dates hidden"></div>
-        <div id="arch-status" class="status-line hidden"></div>
         <div id="arch-thumbs" class="status-line muted hidden"></div>
         <div id="arch-grid" class="grid">
           <p class="placeholder">pick a date to begin.</p>
@@ -159,18 +162,6 @@
         </div>
         <video id="player-video" controls playsinline></video>
         <div id="player-status" class="status-line muted"></div>
-      </div>
-      <div class="card">
-        <div class="card-header">cache</div>
-        <div id="cache-rows" class="cache-rows"></div>
-        <div class="row">
-          <button class="btn" data-cache="thumbs">purge thumbnails</button>
-          <button class="btn" data-cache="previews">purge temporary recording MP4s</button>
-          <button class="btn" data-cache="playback">purge undownloaded-recording HLS files</button>
-          <button class="btn" data-cache="stream">purge live-view buffer</button>
-          <button class="btn warn" data-cache="recordings">purge downloaded recordings</button>
-          <button class="btn warn" data-cache="all">purge all</button>
-        </div>
       </div>
     </section>
 
@@ -224,6 +215,18 @@
         <div class="card-header">events (last 24h)</div>
         <button id="btn-events" class="btn">load events</button>
         <pre id="events-log" class="log"></pre>
+      </div>
+      <div class="card">
+        <div class="card-header">cache</div>
+        <div id="cache-rows" class="cache-rows"></div>
+        <div class="row">
+          <button class="btn" data-cache="thumbs">purge thumbnails</button>
+          <button class="btn" data-cache="previews">purge temporary recording MP4s</button>
+          <button class="btn" data-cache="playback">purge undownloaded-recording HLS files</button>
+          <button class="btn" data-cache="stream">purge live-view buffer</button>
+          <button class="btn warn" data-cache="recordings">purge downloaded recordings</button>
+          <button class="btn warn" data-cache="all">purge all</button>
+        </div>
       </div>
     </section>
 

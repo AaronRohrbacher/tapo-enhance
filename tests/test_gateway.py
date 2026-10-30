@@ -439,3 +439,18 @@ async def test_stop_fails_pending_futures():
     await stop_t
     # fut2 already completed because it was deduplicated/queued and ran.
     assert fut2.done()
+
+
+async def test_staged_fetch_and_finished_download_do_not_share_result(gw):
+    async def staged(_tapo, _cancel):
+        return "recording.download.ts"
+    async def completed(_tapo, _cancel):
+        return "recording.mp4"
+    background = gw.submit_dvr_download(A, staged)
+    manual_fetch = gw.submit_fetch(A, staged)
+    download = gw.submit_download(A, completed)
+    assert background is not download
+    assert manual_fetch is not download
+    assert await download == "recording.mp4"
+    assert await manual_fetch == "recording.download.ts"
+    assert await background == "recording.download.ts"

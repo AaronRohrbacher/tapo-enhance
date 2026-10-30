@@ -132,7 +132,7 @@ def test_dvr_setup_is_separate_and_settings_are_in_settings_tab(client):
     assert archive_start < page.index('id="dvr-availability"') < settings_start
     assert archive_start < page.index('id="dvr-window"') < settings_start
     assert archive_start < page.index('id="btn-dvr-sync"') < settings_start
-    assert archive_start < page.index('id="cache-rows"') < settings_start
+    assert settings_start < page.index('id="cache-rows"')
     assert 'id="dvr-settings-status"' in page
     assert "12:10am" in page
     assert page.count('name="interval_minutes"') == 2
@@ -517,3 +517,83 @@ def test_snapshot_503_when_live_not_running(client):
     r = c.get("/api/snapshot")
     assert r.status_code == 503
     assert r.json()["code"] == Code.CAMERA_OFFLINE.value
+
+
+@pytest.mark.parametrize("body", [[], None, "clip", 42])
+def test_json_routes_reject_non_object_bodies(client, body):
+    c, _ = client
+    response = c.post("/api/recordings/bulk", content=json.dumps(body), headers={"Content-Type": "application/json"})
+    assert response.status_code == 400
+    assert response.json()["code"] == "BAD_REQUEST"
+
+
+def test_json_routes_reject_malformed_json(client):
+    c, _ = client
+    response = c.post("/api/recordings/download", content="{broken", headers={"Content-Type": "application/json"})
+    assert response.status_code == 400
+    assert response.json()["code"] == "BAD_REQUEST"
+
+
+@pytest.mark.parametrize("change", [
+    {"date": "../outside"}, {"date": "20260230"}, {"date": "/tmp"},
+    {"endTime": 1700000000}, {"startTime": -10}, {"startTime": True},
+    {"endTime": 10 ** 30}, {"startTime": 1.5},
+])
+def test_invalid_clips_are_rejected_before_camera_or_filesystem_access(client, change):
+    c, camera = client
+    clip = {"date": "20990101", "startTime": 1700000000, "endTime": 1700000002, **change}
+    response = c.post("/api/recordings/download", json=clip)
+    assert response.status_code == 400
+    assert response.json()["code"] == "BAD_REQUEST"
+    assert not camera.sessions
+
+
+@pytest.mark.parametrize("days", ["invalid", -1, 0, 36501, None])
+def test_bulk_invalid_day_counts_return_structured_errors(client, days):
+    c, _ = client
+    response = c.post("/api/recordings/bulk", json={"all": True, "days": days})
+    assert response.status_code == 400
+    assert response.json()["code"] == "BAD_REQUEST"
+
+
+@pytest.mark.parametrize("enabled", ["false", 0, None, []])
+def test_privacy_rejects_ambiguous_values(client, enabled):
+    c, camera = client
+    response = c.post("/api/camera/privacy", json={"enabled": enabled})
+    assert response.status_code == 400
+    assert response.json()["code"] == "BAD_REQUEST"
+    assert not camera.calls
+
+
+@pytest.mark.parametrize("target", [42, [], {}])
+def test_cache_target_type_errors_are_structured(client, target):
+    c, _ = client
+    response = c.post("/api/cache/clear", json={"target": target})
+    assert response.status_code == 400
+    assert response.json()["code"] == "BAD_REQUEST"
+
+
+def test_shutdown_cancels_manual_sync_and_closes_camera_session(cache_dir, fake_tapo, monkeypatch):
+    entered, closed = threading.Event(), threading.Event()
+    class SilentRecording:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def start(self):
+            entered.set()
+            await asyncio.Event().wait()
+        async def close(self):
+            closed.set()
+    monkeypatch.setattr("pytapo.media_stream.recording_stream.RecordingStream", SilentRecording)
+    app = build_app(settings=Settings(host="127.0.0.1", user="u", password="p", cache_root=cache_dir),
+                    tapo_factory=lambda _s: fake_tapo)
+    with TestClient(app) as c:
+        response = c.post("/api/recordings/bulk", json={"clips": [
+            {"date": "20990101", "startTime": 1700000000, "endTime": 1700000002},
+        ]})
+        assert response.status_code == 200
+        job = app.state.jobs.get(response.json()["job_id"])
+        assert entered.wait(2)
+    assert closed.is_set()
+    assert job.status == "cancelled"
+    assert job._task.done()
+    assert app.state.gateway._task is None or app.state.gateway._task.done()

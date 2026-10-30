@@ -145,6 +145,10 @@ class CameraGateway:
     def submit_download(self, clip: Clip, runner: Runner, *, label: str = "") -> asyncio.Future:
         return self._submit(Priority.DOWNLOAD, f"dl:{clip.key}", runner, label or f"dl {clip.key}")
 
+    def submit_fetch(self, clip: Clip, runner: Runner, *, label: str = "") -> asyncio.Future:
+        """Stage camera bytes; its Future must never stand in for a finished MP4."""
+        return self._submit(Priority.DOWNLOAD, f"fetch:{clip.key}", runner, label or f"fetch {clip.key}")
+
     def submit_query(self, key: str, runner: Runner, *, label: str = "") -> asyncio.Future:
         """Run an interactive camera API call through the single owner."""
         return self._submit(Priority.QUERY, f"query:{key}", runner, label or key)
@@ -169,7 +173,7 @@ class CameraGateway:
 
     def submit_dvr_download(self, clip: Clip, runner: Runner, *, label: str = "") -> asyncio.Future:
         """Queue unattended DVR work behind every interactive camera request."""
-        return self._submit(Priority.DVR, f"dl:{clip.key}", runner, label or f"DVR {clip.key}")
+        return self._submit(Priority.DVR, f"dvr-fetch:{clip.key}", runner, label or f"DVR {clip.key}")
 
     def submit_dvr_query(self, key: str, runner: Runner, *, label: str = "") -> asyncio.Future:
         """Serialize a short DVR index query without blocking queued UI work."""
