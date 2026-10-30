@@ -227,26 +227,38 @@
   })();
 
   // ── camera status polling ────────────────────────────────────────────
+  let statusRetry = null;
   async function loadStatus() {
     const wasConnected = state.camera.status === "connected";
     set((s) => { s.camera.status = "connecting"; });
     const r = await API.get("/api/camera/status");
     if (r.ok) {
+      if (statusRetry !== null) {
+        clearTimeout(statusRetry);
+        statusRetry = null;
+      }
       set((s) => {
         s.camera.status = "connected";
         s.camera.alias = r.data.alias;
         s.camera.host = r.data.host;
         const battery = r.data.battery_percent;
-        s.camera.battery = battery !== null && battery !== undefined && Number.isFinite(Number(battery))
-          ? Number(battery)
-          : null;
-        s.camera.charging = r.data.is_charging;
+        if (battery !== null && battery !== undefined && Number.isFinite(Number(battery))) {
+          s.camera.battery = Number(battery);
+          s.camera.charging = r.data.is_charging;
+        }
+        s.camera.batteryStale = !!r.data.battery_error;
       });
       UI.renderSettings(r.data);
       if (!wasConnected) SFX.access();
       return true;
     }
-    set((s) => { s.camera.status = "disconnected"; });
+    set((s) => { s.camera.status = r.retryable ? "reconnecting" : "disconnected"; });
+    if (r.retryable && statusRetry === null) {
+      statusRetry = setTimeout(() => {
+        statusRetry = null;
+        loadStatus();
+      }, 5000);
+    }
     SFX.alert();
     if (r.retryable) toast("camera offline — try [reconnect]", "error");
     else if (r.code === "CAMERA_AUTH") toast("camera authentication failed — reconfigure the encrypted vault", "error");
@@ -332,6 +344,7 @@
     // on each gateway tick — the exact waste we're removing.
     state.gateway = {
       busy: evt.busy,
+      busyLabel: evt.busyLabel,
       queued: evt.queued,
       liveAttached: evt.liveAttached,
       liveRunning: evt.liveRunning,
@@ -645,6 +658,17 @@
       watchClip(clip);
     }
   });
+
+  // A transient HTTP/decode failure must not leave a permanent broken icon.
+  // Retry the image itself once; server-side validation handles corrupt cache files.
+  $("#arch-grid").addEventListener("error", (ev) => {
+    const img = ev.target.closest && ev.target.closest("img.thumb");
+    if (!img || img.dataset.retry === "1") return;
+    img.dataset.retry = "1";
+    const url = new URL(img.currentSrc || img.src || img.dataset.src, location.href);
+    url.searchParams.set("retry", Date.now().toString());
+    setTimeout(() => { img.src = url.toString(); }, 500);
+  }, true);
 
   async function downloadClip(clip) {
     const k = clipKey(clip);

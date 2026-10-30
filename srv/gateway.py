@@ -113,6 +113,7 @@ class CameraGateway:
         # tests assert no overlap with live, and is the fact every "no
         # contention" property test depends on.
         self._busy_kind: str | None = None
+        self._busy_label: str | None = None
         self._activity_log: list[tuple[str, str]] = []  # for tests
 
     # ── lifecycle ──────────────────────────────────────────────────────
@@ -227,6 +228,7 @@ class CameraGateway:
         return {
             "type": "gateway",
             "busy": self._busy_kind,
+            "busyLabel": self._busy_label,
             "queued": self.queued_count(),
             "liveAttached": self.live_attached(),
             "liveRunning": self.live_running(),
@@ -361,6 +363,7 @@ class CameraGateway:
             else "thumb"
         )
         self._busy_kind = kind
+        self._busy_label = job.label
         self._activity_log.append((kind, "start:" + job.key))
         self._emit()
         try:
@@ -396,6 +399,7 @@ class CameraGateway:
                 self._activity_log.append((kind, "done:" + job.key))
         finally:
             self._busy_kind = None
+            self._busy_label = None
             self._inflight.pop(job.key, None)
             job.finished.set()
             self._emit()

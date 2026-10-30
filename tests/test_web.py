@@ -215,6 +215,20 @@ def test_camera_status_returns_structured_info(client):
     assert j["is_charging"] is False
 
 
+def test_camera_status_retains_last_known_battery_on_subcall_failure(client, monkeypatch):
+    c, fake = client
+    assert c.get("/api/camera/status").json()["battery_percent"] == 73
+
+    def fail_battery():
+        raise TimeoutError("battery endpoint slept")
+
+    monkeypatch.setattr(fake, "getBatteryStatus", fail_battery)
+    current = c.get("/api/camera/status").json()
+    assert current["ok"] is True
+    assert current["battery_percent"] == 73
+    assert "TimeoutError" in current["battery_error"]
+
+
 def test_info_includes_battery_when_available(client):
     c, _ = client
     j = c.get("/api/info").json()
@@ -417,6 +431,7 @@ def test_thumb_endpoint_serves_placeholder_with_status_header(client):
     r = c.get("/api/thumb/20260426/1777187350/1777187366")
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/jpeg"
+    assert r.content.startswith(b"\xff\xd8") and r.content.endswith(b"\xff\xd9")
     assert r.headers["x-thumb-status"] in ("queued", "running", "ready")
 
 

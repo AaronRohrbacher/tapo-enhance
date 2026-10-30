@@ -31,6 +31,20 @@ from .recordings import Clip, Paths
 
 log = logging.getLogger(__name__)
 
+
+def valid_thumbnail(path: Path) -> bool:
+    """Reject partial/HTML responses that are large enough to fool a size check."""
+    try:
+        if path.stat().st_size <= 100:
+            return False
+        with path.open("rb") as fh:
+            start = fh.read(2)
+            fh.seek(-2, 2)
+            end = fh.read(2)
+        return start == b"\xff\xd8" and end == b"\xff\xd9"
+    except OSError:
+        return False
+
 # ── Source 1/2: extract from local mp4 ─────────────────────────────────────
 
 
@@ -41,7 +55,7 @@ async def extract_from_local(clip: Clip, paths: Paths) -> Path | None:
     Tries the recording first, then the preview as a fallback (which is
     smaller but already H.264 if it exists)."""
     out = paths.thumb(clip)
-    if out.exists() and out.stat().st_size > 100:
+    if valid_thumbnail(out):
         return out
     for src in (paths.recording(clip), paths.preview(clip)):
         if src.exists() and src.stat().st_size > 1024:
@@ -65,7 +79,7 @@ async def extract_from_local(clip: Clip, paths: Paths) -> Path | None:
                 if proc.returncode is None:
                     proc.kill()
                     await proc.wait()
-            if rc == 0 and tmp.exists() and tmp.stat().st_size > 100:
+            if rc == 0 and valid_thumbnail(tmp):
                 tmp.replace(out)
                 return out
             if tmp.exists():
@@ -100,7 +114,7 @@ async def _native_thumbnail(tapo: Any, clip: Clip, paths: Paths, cancel: asyncio
             context={"reason": str(exc)},
         ) from exc
 
-    if tmp.exists() and tmp.stat().st_size > 100:
+    if valid_thumbnail(tmp):
         tmp.replace(out)
         return out
     tmp.unlink(missing_ok=True)
@@ -220,7 +234,7 @@ class ThumbBackfill:
                 if not st or st["status"] in ("ready", "failed"):
                     continue
                 # Cheap check: maybe the file appeared in the meantime.
-                if self.paths.thumb(clip).exists():
+                if valid_thumbnail(self.paths.thumb(clip)):
                     st["status"] = "ready"
                     st["message"] = "Thumbnail already cached"
                     self._emit(key)
@@ -240,7 +254,7 @@ class ThumbBackfill:
                     await self.gateway.submit_thumb(
                         clip, make_camera_runner(clip, self.paths)
                     )
-                    if self.paths.thumb(clip).exists():
+                    if valid_thumbnail(self.paths.thumb(clip)):
                         st["status"] = "ready"
                         st["error"] = None
                         st["message"] = "Thumbnail ready"

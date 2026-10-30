@@ -30,7 +30,7 @@
     const battery = $("#battery-status");
     if (battery) {
       battery.textContent = Number.isFinite(s.camera.battery)
-        ? `${s.camera.battery}%${s.camera.charging ? " ⚡" : ""}`
+        ? `${s.camera.battery}%${s.camera.charging ? " ⚡" : ""}${s.camera.batteryStale ? " (last known)" : ""}`
         : "battery unavailable";
       battery.title = s.camera.charging ? "camera battery (charging)" : "camera battery";
     }
@@ -41,9 +41,10 @@
     const el = $("#gateway-state");
     if (!el) return;
     const parts = [];
-    if (s.gateway.busy) parts.push(`busy: ${s.gateway.busy}`);
-    if (s.gateway.queued) parts.push(`queued: ${s.gateway.queued}`);
-    if (s.gateway.liveRunning) parts.push("live");
+    if (s.gateway.busy) parts.push(s.gateway.busyLabel || `${s.gateway.busy} in progress`);
+    if (s.gateway.queued) parts.push(`${s.gateway.queued} waiting`);
+    if (s.gateway.liveRunning) parts.push("streaming live video");
+    else if (s.gateway.liveAttached && !s.gateway.busy) parts.push("starting live video");
     el.textContent = parts.join(" • ") || "camera ready";
   }
 

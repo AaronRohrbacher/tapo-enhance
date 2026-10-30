@@ -9,7 +9,7 @@ import pytest
 
 from srv.gateway import CameraGateway
 from srv.recordings import Clip
-from srv.thumbs import ThumbBackfill, extract_from_local, make_camera_runner
+from srv.thumbs import ThumbBackfill, extract_from_local, make_camera_runner, valid_thumbnail
 
 
 CLIP = Clip("20990101", 1700000000, 1700000005)
@@ -37,6 +37,13 @@ async def test_extract_from_local_falls_back_to_preview(paths, make_av_mp4):
 
 async def test_extract_from_local_returns_none_when_nothing_cached(paths):
     assert await extract_from_local(CLIP, paths) is None
+
+
+def test_valid_thumbnail_rejects_large_but_corrupt_file(paths):
+    out = paths.thumb(CLIP)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(b"not a jpeg" * 20)
+    assert valid_thumbnail(out) is False
 
 
 # ── camera pull ───────────────────────────────────────────────────────────

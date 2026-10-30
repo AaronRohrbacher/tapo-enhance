@@ -412,6 +412,18 @@ async def test_busy_kind_reflects_active_job(gw):
     assert gw.busy_kind() is None
 
 
+async def test_status_includes_specific_active_label(gw):
+    seen = []
+
+    async def runner(_t, _c):
+        seen.append(gw.status())
+
+    await gw.submit_query("camera-status", runner, label="Reading camera and battery status")
+    assert seen[0]["busy"] == "query"
+    assert seen[0]["busyLabel"] == "Reading camera and battery status"
+    assert gw.status()["busyLabel"] is None
+
+
 async def test_stop_fails_pending_futures():
     g = CameraGateway(get_tapo=_fake_get_tapo)
     await g.start()

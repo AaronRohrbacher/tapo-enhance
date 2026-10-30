@@ -12,6 +12,7 @@ classification simple."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import ipaddress
 import json
 import logging
@@ -48,7 +49,7 @@ from .live import HlsConsumer, camera_live_source
 from .playback import make_runner as playback_runner
 from .playback import playlist_url
 from .recordings import Clip, Paths
-from .thumbs import ThumbBackfill, extract_from_local
+from .thumbs import ThumbBackfill, extract_from_local, valid_thumbnail
 from . import themes as themes_mod
 from .dvr import ALLOWED_INTERVALS, DvrService, days_between
 from .version import __version__
@@ -476,12 +477,12 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
     async def _to_thread(fn, *args, **kwargs):
         return await asyncio.get_event_loop().run_in_executor(None, lambda: fn(*args, **kwargs))
 
-    async def _camera_query(key, op):
+    async def _camera_query(key, op, *, label=None):
         async def runner(_tapo, _cancel):
             # Keep CameraConnection's wake/reconnect retry, but execute it
             # while the gateway exclusively owns camera access.
             return await asyncio.to_thread(camera.with_retry, op)
-        return await gateway.submit_query(key, runner, label=key)
+        return await gateway.submit_query(key, runner, label=label or key)
 
     @app.get("/api/info")
     async def info():
@@ -502,6 +503,10 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         except Exception as e:
             raise _classify(e)
 
+    last_battery: dict[str, object] = {
+        "percent": None, "charging": False, "updated": None, "error": None,
+    }
+
     @app.get("/api/camera/status")
     async def camera_status():
         def op(t):
@@ -509,9 +514,17 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
             di = basic.get("device_info", {}).get("basic_info", {})
             try:
                 battery = t.getBatteryStatus() or {}
-            except Exception:
+                battery_percent, is_charging = _battery_summary(battery)
+                if battery_percent is not None:
+                    last_battery.update(
+                        percent=battery_percent, charging=is_charging,
+                        updated=time.time(), error=None,
+                    )
+            except Exception as exc:
                 battery = {}
-            battery_percent, is_charging = _battery_summary(battery)
+                last_battery["error"] = f"{type(exc).__name__}: {exc}"
+            battery_percent = last_battery["percent"]
+            is_charging = bool(last_battery["charging"])
             if di.get("mac"):
                 settings.remember_mac(di["mac"])
             return {
@@ -524,9 +537,13 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
                 "host": settings.host,
                 "battery_percent": battery_percent,
                 "is_charging": is_charging,
+                "battery_updated": last_battery["updated"],
+                "battery_error": last_battery["error"],
             }
         try:
-            return await _camera_query("camera-status", op)
+            return await _camera_query(
+                "camera-status", op, label="Reading camera and battery status"
+            )
         except ApiError:
             raise
         except Exception as e:
@@ -862,13 +879,17 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 
     # ── thumbs + previews ──────────────────────────────────────────────
 
-    _PLACEHOLDER = _build_placeholder(paths.root.parent / ".placeholder.jpg")
+    # Embedded, decoder-tested JPEG: placeholder delivery cannot depend on
+    # ffmpeg startup, cache permissions, or a writable filesystem.
+    _PLACEHOLDER = base64.b64decode(
+        "/9j/4AAQSkZJRgABAgAAAQABAAD//gAPTGF2YzYzLjEuMTAyAP/bAEMACBAQExATFhYWFhYWGhgaGxsbGhoaGhsbGx0dHSIiIh0dHRsbHR0gICIiJSYlIyMiIyYmKCgoMDAuLjg4OkVFU//EAE0AAQEAAAAAAAAAAAAAAAAAAAAHAQEBAQAAAAAAAAAAAAAAAAAAAgMQAQAAAAAAAAAAAAAAAAAAAAARAQAAAAAAAAAAAAAAAAAAAAD/wAARCADwAUADASIAAhEAAxEA/9oADAMBAAIRAxEAPwCKAJZgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/Z"
+    )
 
     @app.api_route("/api/thumb/{date}/{start_time}/{end_time}", methods=["GET", "HEAD"])
     async def thumb_endpoint(date: str, start_time: int, end_time: int):
         clip = _parse_clip({"date": date, "startTime": start_time, "endTime": end_time})
         existing = paths.thumb(clip)
-        if existing.exists() and existing.stat().st_size > 100:
+        if valid_thumbnail(existing):
             # Push readiness so the UI counts/badges update without polling —
             # disk-cached thumbs never go through the backfill queue's emit.
             emit_event({"type": "thumb", "key": clip.key, "status": "ready", "error": None})
@@ -1143,23 +1164,3 @@ def _classify(exc: BaseException) -> ApiError:
     if discovery_mod.looks_like_conn_error(exc):
         return ApiError(Code.CAMERA_OFFLINE, str(exc), status=502)
     return ApiError(Code.INTERNAL, f"{type(exc).__name__}: {exc}", status=500)
-
-
-def _build_placeholder(out: Path) -> bytes:
-    """A real, browser-decodable JPEG. Hand-rolled hex blobs failed in
-    Chromium; ffmpeg is the easy way to guarantee a valid file."""
-    if not out.exists() or out.stat().st_size < 100:
-        try:
-            import subprocess
-            subprocess.run(
-                ["ffmpeg", "-y", "-loglevel", "error",
-                 "-f", "lavfi", "-i", "color=c=0x101814:s=320x240:d=0.04",
-                 "-frames:v", "1", "-q:v", "8", str(out)],
-                check=True, capture_output=True,
-            )
-        except Exception:
-            return b""
-    try:
-        return out.read_bytes()
-    except OSError:
-        return b""

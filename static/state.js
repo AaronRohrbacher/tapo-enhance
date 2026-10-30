@@ -6,7 +6,7 @@
   "use strict";
 
   const state = {
-    camera: { status: "connecting", host: "", alias: "", battery: null, charging: false },
+    camera: { status: "connecting", host: "", alias: "", battery: null, charging: false, batteryStale: false },
     features: null,
     live: { status: "idle", url: null, error: null },
     archive: {
@@ -24,7 +24,7 @@
     jobs: {}, // job id -> latest server-pushed manual sync snapshot
     localKeys: new Set(),
     cache: { recordings: 0, thumbs: 0, previews: 0, playback: 0, stream: 0, total: 0 },
-    gateway: { busy: null, queued: 0, liveAttached: false, liveRunning: false },
+    gateway: { busy: null, busyLabel: null, queued: 0, liveAttached: false, liveRunning: false },
   };
 
   const listeners = new Set();
