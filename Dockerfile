@@ -23,7 +23,11 @@ ENV PATH=/opt/venv/bin:$PATH \
     APP_PORT=8000 \
     APP_VERSION=${APP_VERSION}
 
-LABEL org.opencontainers.image.version=${APP_VERSION}
+LABEL org.opencontainers.image.version=${APP_VERSION} \
+      org.opencontainers.image.source="https://github.com/AaronRohrbacher/tapo-enhance" \
+      org.opencontainers.image.title="Tapo Enhance" \
+      org.opencontainers.image.description="Local-first web interface for viewing and downloading Tapo camera recordings" \
+      org.opencontainers.image.licenses="MIT"
 
 COPY --from=build /opt/venv /opt/venv
 WORKDIR /app
