@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import stat
+import tempfile
 from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -66,9 +67,12 @@ def decrypt(blob: bytes, key: bytes) -> dict:
 def write(path: Path, payload: dict, key: bytes) -> None:
     """Atomically replace the vault without writing plaintext to disk."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent,
+    )
+    temporary = Path(temporary_name)
     try:
+        os.chmod(fd, stat.S_IRUSR | stat.S_IWUSR)
         with os.fdopen(fd, "wb") as stream:
             stream.write(encrypt(payload, key))
             stream.flush()

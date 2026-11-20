@@ -9,10 +9,20 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(deploy)
 
 
-def test_legacy_version_starts_at_0_1():
-    assert deploy.next_version("1.0b") == "0.1"
+def test_invalid_legacy_version_starts_at_0_1_0():
+    assert deploy.next_version("1.0b") == "0.1.0"
 
 
-def test_simple_version_increments_minor_number():
-    assert deploy.next_version("0.1") == "0.2"
-    assert deploy.next_version("2.9") == "2.10"
+def test_two_part_version_migrates_and_increments_patch():
+    assert deploy.next_version("0.1") == "0.1.1"
+    assert deploy.next_version("2.9") == "2.9.1"
+
+
+def test_semantic_version_increments_patch_number():
+    assert deploy.next_version("0.1.1") == "0.1.2"
+    assert deploy.next_version("2.9.9") == "2.9.10"
+
+
+def test_choose_version_accepts_semantic_override(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _prompt: "0.1.2")
+    assert deploy.choose_version("0.1.1") == "0.1.2"

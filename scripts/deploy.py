@@ -8,23 +8,33 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION_FILE = ROOT / "VERSION"
-SIMPLE_VERSION = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+SEMANTIC_VERSION = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$"
+)
+LEGACY_VERSION = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
 
 def next_version(current: str) -> str:
-    """Return the next major.minor version; legacy values restart at 0.1."""
-    match = SIMPLE_VERSION.fullmatch(current.strip())
-    if not match:
-        return "0.1"
-    major, minor = (int(part) for part in match.groups())
-    return f"{major}.{minor + 1}"
+    """Return the next patch version, migrating old two-part versions."""
+    value = current.strip()
+    match = SEMANTIC_VERSION.fullmatch(value)
+    if match:
+        major, minor, patch = (int(part) for part in match.groups())
+        return f"{major}.{minor}.{patch + 1}"
+    legacy = LEGACY_VERSION.fullmatch(value)
+    if legacy:
+        major, minor = (int(part) for part in legacy.groups())
+        return f"{major}.{minor}.1"
+    return "0.1.0"
 
 
 def choose_version(suggested: str) -> str:
     entered = input(f"Release version [{suggested}]: ").strip()
     version = entered or suggested
-    if not SIMPLE_VERSION.fullmatch(version):
-        raise ValueError("version must use major.minor format, for example 0.1")
+    if not SEMANTIC_VERSION.fullmatch(version):
+        raise ValueError(
+            "version must use major.minor.patch format, for example 0.1.2"
+        )
     return version
 
 

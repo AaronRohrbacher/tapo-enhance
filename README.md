@@ -1,6 +1,6 @@
 # Tapo Enhance
 
-The release version lives in [`VERSION`](VERSION). Release images receive that
+The published version lives in [`VERSION`](VERSION). Docker images receive that
 version at build time; the same value appears in the UI header and at
 `GET /api/app`.
 
@@ -124,54 +124,93 @@ both camera history and the number of local dates containing downloaded video.
 
 ## Docker Compose
 
-Compose is the recommended way to build and run Tapo Enhance:
+Compose uses Docker's ordinary bridge network by default. Build and run the
+current checkout with:
 
 ```bash
-mkdir -p cache custom-themes
-docker compose up -d --build
+docker compose up --build
 ```
 
-The service uses host networking so discovery and Wake-on-LAN can reach the
-LAN. Open `http://SERVER-IP:8000` and complete first-run setup. Encrypted state
-survives container replacement in `./cache`; its separate installation key is
-kept in the gitignored `./.keys` directory.
-
-For unattended updates to published `latest` images, enable the optional
-Watchtower service:
+Start the published image with:
 
 ```bash
-docker compose --profile updates up -d
+./scripts/run-container.sh published
 ```
 
-Watchtower has access to the Docker socket, which is highly privileged. If you
-prefer explicit updates, omit that profile and run:
+The equivalent local launcher is:
 
 ```bash
-docker compose pull
-docker compose up -d
+./scripts/run-container.sh local
 ```
 
-Publishing a GitHub Release triggers `.github/workflows/container.yml`, which
-builds the application with the companion API fork and publishes release and
-`latest` tags to GitHub Container Registry.
+Local mode builds `tapo-enhance:local`; published mode pulls
+`aaronrohrbacher/tapo-enhance`. Both use the same Compose file, Docker named
+volumes, and default networking. Port 8000 is published on the Docker host, so
+open `http://localhost:8000` on that host or `http://DOCKER-HOST:8000` from the
+LAN. Set `APP_BIND_ADDRESS=127.0.0.1` to restrict the published port to the
+Docker host.
 
-### Releasing a public image
+The application image includes `nmap`, `iproute2`, `ffmpeg`, `ffprobe`, and
+`curl`. A bridge-networked container cannot reliably infer the Docker host's
+physical LAN subnet. Set `TAPO_SUBNET` in `.env`, or enter the LAN subnet in
+first-run setup, when automatic discovery proposes Docker's internal subnet:
 
-1. Run `./scripts/deploy.py`. It proposes the next simple `major.minor`
-   version (`0.1` for the first run) and updates `VERSION`. Use `--dry-run` to
-   exercise the prompt without changing the file.
-2. Review and commit the release changes.
-3. Create and publish a GitHub Release whose tag is exactly `v` plus the
-   `VERSION` value (for example, `v0.1`).
-4. The container workflow publishes both
-   `ghcr.io/aaronrohrbacher/tapo-enhance:<version>` and `:latest`, embedding the
-   same version in the image and UI.
-5. On the package page in GitHub, open **Package settings → Change visibility**
-   and select **Public**. GHCR visibility is account/package state and cannot be
-   guaranteed by repository code alone.
+```dotenv
+TAPO_SUBNET=192.168.1.0/24
+```
 
-The workflow also supports manual dispatch, which publishes only the immutable
-`VERSION` tag. Release publishing is intentionally left to a repository owner.
+Encrypted state survives container replacement in the Docker-managed
+`tapo-data` volume; its separate installation key is kept in the `tapo-keys`
+volume. Both volumes are prepared for the unprivileged application user at
+container startup.
+
+Advanced operators may attach the service to an external network created and
+managed at the Docker-host level—for example, a `docker-net-dhcp` network
+managed by Komodo. This project does not install network plugins, select host
+interfaces, create external networks, or modify host forwarding/firewall
+settings.
+
+To inspect the container's address and routes:
+
+```bash
+./scripts/run-container.sh published exec tapo-enhance ip -4 address show
+./scripts/run-container.sh published exec tapo-enhance ip -4 route show
+```
+
+To update the published image explicitly:
+
+```bash
+./scripts/run-container.sh published pull
+./scripts/run-container.sh published up -d
+```
+
+### Docker Hub publishing
+
+Pull requests targeting `main` run the complete Python and Chromium test suites,
+and branch protection requires that CI check to pass before merge. A direct
+commit or merged pull request that reaches `main` runs the same tests again.
+Only a successful `main` push builds and publishes
+`aaronrohrbacher/tapo-enhance` to Docker Hub with these tags:
+
+- `latest`
+- the semantic version recorded in [`VERSION`](VERSION), such as `0.1.2`
+- `sha-<full-git-commit>`, providing an immutable tag for the exact source
+
+The same job updates the Docker Hub repository overview from this `README.md`
+and converts its relative links to GitHub URLs. Pull requests test but never
+publish; there are no release, scheduled, or manual-dispatch triggers.
+
+Before the first run, create a GitHub Actions repository secret named
+`DOCKERHUB_TOKEN`. It must be a Docker Hub personal access token for the
+`aaronrohrbacher` account with permission to push the image and update the
+repository description. The Docker Hub repository
+`aaronrohrbacher/tapo-enhance` must already exist.
+
+Keep [`VERSION`](VERSION) in `major.minor.patch` form. To prepare a new semantic
+version locally, run `./scripts/deploy.py`, review its change, and include it in
+the commit or pull request that reaches `main`. Reusing the same value leaves
+the version tag pointing at the newest successful `main` build; the SHA tag
+always identifies the exact commit.
 
 ## Themes
 
@@ -233,15 +272,18 @@ Tapo Enhance currently has no web login. Treat it as a trusted-LAN service:
 - Never place camera credentials in `.env`, Compose variables, or source files.
 - If remote access is needed, put the app behind an authenticated reverse proxy
   or reach the LAN through a VPN.
-- Run it as an unprivileged user with write access only to this project/cache.
+- Run it as an unprivileged user with write access only to its data and key
+  storage.
 
 During setup the password exists briefly in server memory while the camera is
-verified. It is then stored only as AES-256-GCM authenticated ciphertext in
-`cache/credentials.vault` (mode `0600`). The installation key is separate: a
-gitignored `.keys/` directory, mounted at `/keys` in Docker. Neither is
-included in Git or the image, and the configuration API never returns the
-password. Losing the installation key makes the vault intentionally
-unrecoverable; reconfigure the camera to create a new pair.
+verified. It is then stored only as AES-256-GCM authenticated ciphertext. In
+Docker, the `tapo-data` volume holds `/data/credentials.vault` (mode `0600`)
+and the separate `tapo-keys` volume holds `/keys/credentials.key` (mode
+`0600`). Native development uses the gitignored `cache/` and `.keys/`
+directories. None of these are included in Git or the image, and the
+configuration API never returns the password. Losing the installation key
+makes the vault intentionally unrecoverable; reconfigure the camera to create
+a new pair.
 
 Initial setup currently travels over HTTP on the trusted LAN. Encryption at
 rest does not encrypt that network request. Deploy behind HTTPS before allowing
