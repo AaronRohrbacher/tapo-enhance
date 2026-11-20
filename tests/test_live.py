@@ -14,6 +14,7 @@ import pytest
 
 from srv.gateway import CameraGateway
 from srv.live import HlsConsumer
+from srv.live import LiveLease
 from srv.recordings import Clip
 
 
@@ -106,11 +107,59 @@ async def test_hls_consumer_writes_playlist_when_fed_real_ts(tmp_path, make_av_t
     segs = list(consumer.stream_dir.glob("seg_*.ts"))
     assert segs, "no HLS segments written"
     assert all(s.stat().st_size > 0 for s in segs)
+    first_segments = {
+        line for line in playlist.read_text().splitlines() if line.endswith(".ts")
+    }
     await consumer.started()
     assert not consumer.playlist_path.exists()
     assert not list(consumer.stream_dir.glob("seg_*.ts")), "restart retained stale live segments"
+    for i in range(0, len(ts_bytes), 16 * 1024):
+        await consumer.feed(ts_bytes[i:i + 16 * 1024])
+    await consumer.paused()
+    second_segments = {
+        line for line in playlist.read_text().splitlines() if line.endswith(".ts")
+    }
+    assert first_segments
+    assert second_segments
+    assert first_segments.isdisjoint(second_segments), "live generations reused cache URLs"
     await consumer.stopped()
     assert not list(consumer.stream_dir.iterdir()), "stopped stream cache was not purged"
+
+    restarted_consumer = HlsConsumer(tmp_path / "stream")
+    await restarted_consumer.started()
+    for i in range(0, len(ts_bytes), 16 * 1024):
+        await restarted_consumer.feed(ts_bytes[i:i + 16 * 1024])
+    await restarted_consumer.paused()
+    restarted_segments = {
+        line for line in restarted_consumer.playlist_path.read_text().splitlines()
+        if line.endswith(".ts")
+    }
+    assert restarted_segments
+    assert first_segments.isdisjoint(restarted_segments), "server restart reused cache URLs"
+    await restarted_consumer.stopped()
+
+
+async def test_live_lease_expires_without_viewer_heartbeat():
+    expired = asyncio.Event()
+    lease = LiveLease(timeout=0.03, on_expire=expired.set)
+    token = lease.start()
+    assert lease.active(token)
+    await asyncio.wait_for(expired.wait(), timeout=0.5)
+    assert not lease.active(token)
+    await lease.close()
+
+
+async def test_live_lease_heartbeat_extends_and_stale_token_cannot_touch():
+    expired = asyncio.Event()
+    lease = LiveLease(timeout=0.05, on_expire=expired.set)
+    token = lease.start()
+    await asyncio.sleep(0.03)
+    assert not lease.touch("stale-token")
+    assert lease.touch(token)
+    await asyncio.sleep(0.03)
+    assert not expired.is_set()
+    await asyncio.wait_for(expired.wait(), timeout=0.5)
+    await lease.close()
 
 
 async def test_detach_live_cleans_up():

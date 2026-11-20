@@ -162,6 +162,28 @@ def test_leaving_live_stops_the_server_stream(page, fake_server):
 
 
 @pytest.mark.browser
+def test_pagehide_releases_live_viewer_lease(page, fake_server):
+    stops = []
+    page.route("**/api/stream/start", lambda route: route.fulfill(
+        status=200, content_type="application/json",
+        body='{"ok":true,"url":"/stream/output.m3u8?v=test","lease":"viewer-1"}',
+    ))
+
+    def stop_route(route):
+        stops.append(route.request.post_data or "")
+        route.fulfill(status=200, content_type="application/json", body='{"ok":true}')
+
+    page.route("**/api/stream/stop", stop_route)
+    page.goto(fake_server, timeout=10_000)
+    page.click("#btn-live-start")
+    page.wait_for_function("() => S.state.live.status === 'running'")
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide'))")
+    page.wait_for_timeout(200)
+    assert len(stops) == 1
+    assert '"lease":"viewer-1"' in stops[0]
+
+
+@pytest.mark.browser
 def test_archive_loads_clips_for_a_date(page, fake_server):
     page.goto(fake_server, timeout=10_000)
     page.wait_for_selector(".dot.connected", timeout=5_000)

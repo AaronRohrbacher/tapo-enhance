@@ -14,11 +14,17 @@ ARG APP_VERSION=""
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg nmap iproute2 curl tini gosu \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 1000 tapo
+    && useradd --create-home --uid 1000 tapo \
+    && command -v ffmpeg \
+    && command -v ffprobe \
+    && command -v nmap \
+    && command -v ip \
+    && command -v curl
 
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     TAPO_CACHE_ROOT=/data \
+    TAPO_KEY_ROOT=/keys \
     APP_HOST=0.0.0.0 \
     APP_PORT=8000 \
     APP_VERSION=${APP_VERSION}

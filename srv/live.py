@@ -16,8 +16,10 @@ as a brief stutter, no full reload required.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +29,68 @@ log = logging.getLogger(__name__)
 
 
 PLAYLIST_NAME = "output.m3u8"
-SEGMENT_PATTERN = "seg_%05d.ts"
+SEGMENT_PATTERN = "seg_{cache_key}_%05d.ts"
+
+
+class LiveLease:
+    """Server-side proof that a browser is still watching the live feed."""
+
+    def __init__(self, *, timeout: float, on_expire):
+        self.timeout = timeout
+        self.on_expire = on_expire
+        self._token: str | None = None
+        self._deadline = 0.0
+        self._task: asyncio.Task | None = None
+
+    def start(self) -> str:
+        self.revoke()
+        self._token = uuid.uuid4().hex
+        self._deadline = asyncio.get_running_loop().time() + self.timeout
+        self._task = asyncio.create_task(self._watch(self._token), name="live-viewer-lease")
+        return self._token
+
+    def active(self, token: str) -> bool:
+        return bool(token) and token == self._token
+
+    def touch(self, token: str) -> bool:
+        if not self.active(token):
+            return False
+        self._deadline = asyncio.get_running_loop().time() + self.timeout
+        return True
+
+    def revoke(self, token: str | None = None) -> bool:
+        if token is not None and not self.active(token):
+            return False
+        had_lease = self._token is not None
+        self._token = None
+        self._deadline = 0.0
+        if self._task is not None and self._task is not asyncio.current_task():
+            self._task.cancel()
+        self._task = None
+        return had_lease
+
+    async def close(self) -> None:
+        task = self._task
+        self.revoke()
+        if task is not None and task is not asyncio.current_task():
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _watch(self, token: str) -> None:
+        try:
+            while self.active(token):
+                delay = self._deadline - asyncio.get_running_loop().time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                    continue
+                self._token = None
+                self._deadline = 0.0
+                self._task = None
+                result = self.on_expire()
+                if inspect.isawaitable(result):
+                    await result
+                return
+        except asyncio.CancelledError:
+            raise
 
 
 class HlsConsumer:
@@ -42,6 +105,7 @@ class HlsConsumer:
         self._stderr_task: asyncio.Task | None = None
         self._stderr_tail = bytearray()
         self._generation = 0
+        self._cache_key = ""
         self._playable_generation = 0
         self._on_event = on_event
         self._use_vaapi = os.access("/dev/dri/renderD128", os.R_OK | os.W_OK)
@@ -61,7 +125,7 @@ class HlsConsumer:
 
     @property
     def playback_url(self) -> str:
-        return f"/stream/{PLAYLIST_NAME}?v={self._generation}"
+        return f"/stream/{PLAYLIST_NAME}?v={self._cache_key or self._generation}"
 
     async def started(self) -> None:
         # A live generation must contain only frames from this camera session.
@@ -69,6 +133,7 @@ class HlsConsumer:
         # accumulated playback and can make "live" replay earlier footage.
         self._clear_stream_files()
         self._generation += 1
+        self._cache_key = uuid.uuid4().hex
         await self._spawn_ffmpeg()
         self._emit("starting", "Opening the camera live feed")
 
@@ -121,7 +186,7 @@ class HlsConsumer:
                 "message": message,
                 "error": error,
                 "generation": self._generation,
-                "url": f"/stream/output.m3u8?v={self._generation}",
+                "url": self.playback_url,
             })
 
     async def _spawn_ffmpeg(self) -> None:
@@ -151,7 +216,9 @@ class HlsConsumer:
             "-hls_list_size", "6",
             "-hls_delete_threshold", "2",
             "-hls_flags", "delete_segments+omit_endlist+independent_segments+temp_file",
-            "-hls_segment_filename", str(self.stream_dir / SEGMENT_PATTERN),
+            "-hls_segment_filename", str(
+                self.stream_dir / SEGMENT_PATTERN.format(cache_key=self._cache_key)
+            ),
             "-start_number", "0",
             str(self.playlist_path),
             stdin=asyncio.subprocess.PIPE,

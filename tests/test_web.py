@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import asyncio
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 import logging
 from datetime import datetime
@@ -102,6 +103,34 @@ def test_live_to_recordings_concurrent_http_requests_do_not_kill_queue(client, m
     assert status["queued"] == 0
     assert status["busy"] is None
     assert c.portal.call(lambda: not gateway._task.done())
+
+
+def test_live_viewer_lease_heartbeat_and_expiry_stop_stream(client, monkeypatch):
+    c, _camera = client
+    gateway = c.app.state.gateway
+    hls = c.app.state.hls
+    c.app.state.live_lease.timeout = 0.08
+
+    async def started():
+        hls._generation += 1
+        hls._playable_generation = hls._generation
+
+    async def live(_tapo, cancel, _consumer):
+        await cancel.wait()
+
+    monkeypatch.setattr(hls, "started", started)
+    monkeypatch.setattr(gateway, "_live_source", live)
+
+    response = c.post("/api/stream/start")
+    assert response.status_code == 200
+    lease = response.json()["lease"]
+    assert c.post("/api/stream/heartbeat", json={"lease": "stale"}).status_code == 409
+    time.sleep(0.05)
+    assert c.post("/api/stream/heartbeat", json={"lease": lease}).status_code == 200
+    time.sleep(0.05)
+    assert c.get("/api/stream/status").json()["running"] is True
+    time.sleep(0.06)
+    assert c.get("/api/stream/status").json()["running"] is False
 
 
 def test_index_has_name_and_favicon(client):

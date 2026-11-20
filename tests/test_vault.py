@@ -16,6 +16,20 @@ def test_credentials_are_encrypted_authenticated_and_not_written_plaintext(tmp_p
     assert decrypt(vault_path.read_bytes(), key)["password"] == "not-for-disk"
 
 
+def test_stale_legacy_temporary_file_does_not_block_vault_write(tmp_path):
+    key_path = tmp_path / "keys" / "credentials.key"
+    vault_path = tmp_path / "data" / "credentials.vault"
+    stale = vault_path.with_suffix(".tmp")
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"interrupted-old-write")
+
+    key = load_or_create_key(key_path)
+    write(vault_path, {"password": "saved"}, key)
+
+    assert decrypt(vault_path.read_bytes(), key)["password"] == "saved"
+    assert stale.read_bytes() == b"interrupted-old-write"
+
+
 def test_wrong_key_and_tampering_are_rejected(tmp_path):
     key = load_or_create_key(tmp_path / "key")
     blob = encrypt({"password": "hidden"}, key)
