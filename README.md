@@ -1,25 +1,19 @@
 # Tapo Enhance
 
-The published version lives in [`VERSION`](VERSION). Docker images receive that
-version at build time; the same value appears in the UI header and at
-`GET /api/app`.
-
-**A local-first web interface for viewing and downloading recordings from a
-Tapo camera you own.**
+A local-first web interface for viewing and downloading recordings from your
+Tapo camera.
 
 Tapo Enhance runs on a machine on your LAN and talks directly to the camera.
 It provides live video, SD-card event browsing, native event thumbnails,
 progressive playback, explicit downloads, battery status, discovery, and
 recovery for sleeping or DHCP-moved cameras.
 
-This project exists because owning hardware should include the freedom to use,
-inspect, automate, repair, and improve it.
+Developed and hardware-tested with the **Tapo D225**. Compatibility with other
+models depends on their firmware and supported protocols. This is an independent
+community project, unaffiliated with TP-Link.
 
-> [!IMPORTANT]
-> Tapo Enhance is an independent community project. It is not affiliated with,
-> endorsed by, or supported by TP-Link. Camera protocols and firmware can
-> change. The current implementation has been developed and hardware-tested
-> against a Tapo D225.
+[Docker Compose](#docker-compose) · [Native installation](#native-installation) ·
+[Security](#security) · [Development](#development-and-tests)
 
 ## What it does
 
@@ -38,21 +32,9 @@ inspect, automate, repair, and improve it.
 - Reports current work and failures to the UI over one server-sent event
   connection rather than constant status polling.
 
-## Credit
+## Native installation
 
-Tapo Enhance is built on [Juraj Nyíri's `pytapo`](https://github.com/JurajNyiri/pytapo),
-whose reverse-engineering and open-source implementation provide the foundation
-for direct Tapo communication. Thank you to Juraj and the `pytapo` contributors.
-
-The companion [`pytapo` fork](https://github.com/AaronRohrbacher/pytapo) is
-maintained separately and pinned to an exact commit in `requirements.txt`.
-The fork preserves
-upstream history and licensing and adds native recording thumbnails plus
-focused recording/live stream classes in the upstream project's style. This
-keeps camera-protocol behavior in the library instead of duplicating it in the
-web application.
-
-## Requirements
+### Requirements
 
 - Linux on the same LAN as the camera
 - Python 3.11 or newer
@@ -67,14 +49,14 @@ On Debian or Ubuntu:
 sudo apt install ffmpeg nmap iproute2 python3-venv
 ```
 
-## Install
+### Install and run
 
 ```bash
 git clone https://github.com/AaronRohrbacher/tapo-enhance.git
 cd tapo-enhance
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
-make install
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
 Optional non-secret server settings may be placed in `.env`:
@@ -89,7 +71,7 @@ Camera credentials are deliberately rejected from environment variables.
 Start the server:
 
 ```bash
-make run
+.venv/bin/python app.py
 ```
 
 Then open `http://SERVER-IP:8000` from a browser on your LAN. `Ctrl-C` closes
@@ -124,8 +106,12 @@ both camera history and the number of local dates containing downloaded video.
 
 ## Docker Compose
 
-Compose uses Docker's ordinary bridge network by default. Build and run the
-current checkout with:
+Requires Docker Engine and Docker Compose on Linux, on the camera's LAN.
+The image bundles the application and its system dependencies; the native
+Python installation above is unnecessary when using Docker.
+
+Clone this repository and enter its directory, then build and run the current
+checkout:
 
 ```bash
 docker compose up --build
@@ -162,11 +148,9 @@ Encrypted state survives container replacement in the Docker-managed
 volume. Both volumes are prepared for the unprivileged application user at
 container startup.
 
-Advanced operators may attach the service to an external network created and
-managed at the Docker-host level—for example, a `docker-net-dhcp` network
-managed by Komodo. This project does not install network plugins, select host
-interfaces, create external networks, or modify host forwarding/firewall
-settings.
+Custom networking is an advanced deployment choice. The supplied configuration
+uses host networking and does not install network plugins or change the host's
+forwarding or firewall settings.
 
 To inspect the container's address and routes:
 
@@ -185,18 +169,18 @@ To update the published image explicitly:
 ### Docker Hub publishing
 
 Pull requests targeting `main` run the complete Python and Chromium test suites,
-and branch protection requires that CI check to pass before merge. A direct
-commit or merged pull request that reaches `main` runs the same tests again.
-Only a successful `main` push builds and publishes
+and branch protection requires both checks to pass before merge. Updates to
+`main` run CI again and independently trigger the Docker Hub publishing workflow.
+The publishing workflow builds and publishes
 `aaronrohrbacher/tapo-enhance` to Docker Hub with these tags:
 
 - `latest`
 - the semantic version recorded in [`VERSION`](VERSION), such as `0.1.2`
-- `sha-<full-git-commit>`, providing an immutable tag for the exact source
+- `sha-<full-git-commit>`, identifying the exact source commit
 
-The same job updates the Docker Hub repository overview from this `README.md`
-and converts its relative links to GitHub URLs. Pull requests test but never
-publish; there are no release, scheduled, or manual-dispatch triggers.
+The same job updates the Docker Hub repository overview from this `README.md`.
+Pull requests test without publishing. Both workflows also support manual
+dispatch; neither uses release or scheduled triggers.
 
 Before the first run, create a GitHub Actions repository secret named
 `DOCKERHUB_TOKEN`. It must be a Docker Hub personal access token for the
@@ -209,6 +193,9 @@ version locally, run `./scripts/deploy.py`, review its change, and include it in
 the commit or pull request that reaches `main`. Reusing the same value leaves
 the version tag pointing at the newest successful `main` build; the SHA tag
 always identifies the exact commit.
+
+The build embeds this version in the image; it appears in the UI header and
+at `GET /api/app`.
 
 ## Themes
 
@@ -287,10 +274,6 @@ Initial setup currently travels over HTTP on the trusted LAN. Encryption at
 rest does not encrypt that network request. Deploy behind HTTPS before allowing
 setup or access across an untrusted network.
 
-The web application still has no login. Anyone who can reach it can operate or
-reconfigure the camera, so network isolation or an authenticated reverse proxy
-is mandatory outside a trusted LAN.
-
 No Tapo cloud service is required by Tapo Enhance's application workflow.
 
 ## Development and tests
@@ -317,6 +300,13 @@ at a time; no full-video thumbnail generation; no archive write without an
 explicit download; bounded transient storage; and errors visible to the user.
 
 ## License
+
+Tapo Enhance builds on [Juraj Nyíri's `pytapo`](https://github.com/JurajNyiri/pytapo).
+Thank you to Juraj and the contributors for making direct Tapo communication
+possible. The separately maintained
+[`pytapo` fork](https://github.com/AaronRohrbacher/pytapo) adds native recording
+thumbnails and recording/live stream support, and is pinned to an exact commit
+in `requirements.txt`.
 
 Tapo Enhance is licensed under GPL-2.0-only; see [`LICENSE`](LICENSE). The
 companion `pytapo` fork retains the upstream MIT license and attribution. Its
