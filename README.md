@@ -25,47 +25,31 @@ in `requirements.txt`.
 
 ### Docker
 
-Requires Docker Engine on Linux, on the camera's LAN. The published image
-includes the application and its dependencies.
+Requires Docker Engine and Docker Compose on Linux, on the camera's LAN.
+The published image includes the application and its dependencies.
 
-#### Docker run
+#### Docker Compose
 
-Pull the latest image from Docker Hub and start the container in one command:
+Download [compose.hub.yaml](https://raw.githubusercontent.com/AaronRohrbacher/tapo-enhance/main/compose.hub.yaml)
+and save it as `compose.yaml` in a directory of your choice. Then start the app:
 
 ```bash
-docker run -d --pull=always --name tapo-enhance \
-  --network host \
-  --restart unless-stopped \
-  -e APP_PORT=8000 \
-  -e TAPO_CACHE_ROOT=/data \
-  -e TAPO_KEY_ROOT=/keys \
-  -v tapo-data:/data \
-  -v tapo-keys:/keys \
-  aaronrohrbacher/tapo-enhance:latest
+curl -fsSL https://raw.githubusercontent.com/AaronRohrbacher/tapo-enhance/main/compose.hub.yaml -o compose.yaml
+docker compose up -d
 ```
 
 Open `http://localhost:8000` on the Docker host or `http://DOCKER-HOST:8000`
 from another machine on the LAN.
 
-#### Docker Compose
-
-Alternatively, use Docker Compose with the same published image. Choose one
-of these installation methods; you do not need to run both.
-
-Create a directory for the application and save the following as `compose.yaml`.
-It pulls the published image directly from
+Compose pulls the published image directly from
 [Docker Hub](https://hub.docker.com/r/aaronrohrbacher/tapo-enhance); no source
-checkout or Python installation is needed.
+checkout or Python installation is needed. The downloaded file contains:
 
 ```yaml
 services:
   tapo-enhance:
     image: aaronrohrbacher/tapo-enhance:latest
     network_mode: host
-    environment:
-      APP_PORT: 8000
-      TAPO_CACHE_ROOT: /data
-      TAPO_KEY_ROOT: /keys
     volumes:
       - tapo-data:/data
       - tapo-keys:/keys
@@ -74,12 +58,6 @@ services:
 volumes:
   tapo-data:
   tapo-keys:
-```
-
-From that directory, start the application:
-
-```bash
-docker compose up -d
 ```
 
 Open `http://localhost:8000` on the Docker host
