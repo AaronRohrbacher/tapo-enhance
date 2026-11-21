@@ -4,13 +4,19 @@
 PY      := .venv/bin/python
 PYTEST  := .venv/bin/pytest
 
-.PHONY: install install-dev run test test-browser test-all check fmt clean
+.PHONY: install install-dev install-browser run test test-browser test-all check fmt clean
 
 install:
 	$(PY) -m pip install -r requirements.txt
 
 install-dev:
 	$(PY) -m pip install -r requirements-dev.txt
+
+# Playwright's Python package and its browser binary are versioned separately.
+# Keep this explicit target so a dependency upgrade cannot leave local tests
+# pointing at a browser revision that has not been downloaded yet.
+install-browser:
+	$(PY) -m playwright install chromium
 
 run:
 	$(PY) app.py
@@ -21,7 +27,7 @@ run:
 test:
 	$(PYTEST) tests/
 
-test-browser:
+test-browser: install-browser
 	$(PYTEST) tests/test_browser.py -m browser
 
 # Everything, in two passes — what CI should run.
