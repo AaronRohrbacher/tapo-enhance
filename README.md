@@ -12,126 +12,32 @@ Developed and hardware-tested with the **Tapo D225**. Compatibility with other
 models depends on their firmware and supported protocols. This is an independent
 community project, unaffiliated with TP-Link.
 
-[Docker Compose](#docker-compose) · [Native installation](#native-installation) ·
-[Security](#security) · [Development](#development-and-tests)
+## Credit
 
-## What it does
+Tapo Enhance builds on [Juraj Nyíri's `pytapo`](https://github.com/JurajNyiri/pytapo).
+Thank you to Juraj and the contributors for making direct Tapo communication
+possible. The separately maintained
+[`pytapo` fork](https://github.com/AaronRohrbacher/pytapo) adds native recording
+thumbnails and recording/live stream support, and is pinned to an exact commit
+in `requirements.txt`.
 
-- Streams the live camera feed to a browser as a short, rolling HLS window.
-- Lists recording events stored on the camera's SD card.
-- Retrieves the camera's native JPEG for an event thumbnail. It does **not**
-  download an entire recording to manufacture a thumbnail.
-- Starts archive playback as soon as the first HLS segments are ready.
-- Downloads exactly the selected event only when you explicitly click
-  **Download**. Watching and thumbnail generation do not archive recordings.
-- Serializes camera media access so live video, thumbnails, playback, and
-  downloads do not fight over the camera's single media session.
-- Learns and persists the camera's MAC address and last working IP, wakes a
-  sleeping camera only after a connection failure, and can rediscover a camera
-  that moved after a DHCP lease change.
-- Reports current work and failures to the UI over one server-sent event
-  connection rather than constant status polling.
+## Installation
 
-## Native installation
+### Docker
 
-### Requirements
+Requires Docker Engine and Docker Compose on Linux, on the camera's LAN.
+The image bundles the application and its system dependencies; the native
+Python installation is unnecessary when using Docker.
 
-- Linux on the same LAN as the camera
-- Python 3.11 or newer
-- `ffmpeg` and `ffprobe`
-- `nmap` and the `ip` command for automatic rediscovery
-- A Tapo camera account configured in the Tapo mobile app
-- An SD card in the camera for archive browsing
-
-On Debian or Ubuntu:
-
-```bash
-sudo apt install ffmpeg nmap iproute2 python3-venv
-```
-
-### Install and run
+Get the repository and start the published image:
 
 ```bash
 git clone https://github.com/AaronRohrbacher/tapo-enhance.git
 cd tapo-enhance
-python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r requirements.txt
-```
-
-Optional non-secret server settings may be placed in `.env`:
-
-```dotenv
-APP_HOST=0.0.0.0
-APP_PORT=8000
-```
-
-Camera credentials are deliberately rejected from environment variables.
-
-Start the server:
-
-```bash
-.venv/bin/python app.py
-```
-
-Then open `http://SERVER-IP:8000` from a browser on your LAN. `Ctrl-C` closes
-active application connections and exits immediately.
-
-If no camera credentials exist, the browser opens a first-run configuration
-form. The same form is available later under **Settings → configure another
-camera**. New details are verified against the camera before replacing the
-working configuration.
-
-First-run setup automatically derives the LAN subnet from the server's default
-route and scans it for Tapo camera candidates. A single result fills the camera
-address automatically; multiple results are shown for explicit selection. The
-subnet and address remain editable for segmented networks or unusual routing.
-
-### DVR Mode
-
-DVR Mode is available during first-run setup and later under **Settings**. It
-automatically downloads the camera's recording history, then checks on a
-user-selected interval. The default is 12:10am server time each day for the
-previous day's recordings. **Archive** shows sync status and provides **Sync
-now**; locally downloaded camera clips carry a persistent **LOCAL** indicator,
-including clips downloaded by DVR Mode. Local clips are validated and played
-from disk without opening another camera media session. A corrupt cached copy
-is retrieved again and atomically replaced. The default
-history length is the number of days from the
-oldest recording currently available through today. A longer history is valid:
-the app keeps checking and retains that many days as recordings become
-available. Retention deletes only local copies; it never deletes recordings on
-the camera. Initial setup shows the camera's available history; Archive shows
-both camera history and the number of local dates containing downloaded video.
-
-## Docker Compose
-
-Requires Docker Engine and Docker Compose on Linux, on the camera's LAN.
-The image bundles the application and its system dependencies; the native
-Python installation above is unnecessary when using Docker.
-
-Clone this repository and enter its directory, then build and run the current
-checkout:
-
-```bash
-docker compose up --build
-```
-
-Start the published image with:
-
-```bash
 ./scripts/run-container.sh published
 ```
 
-The equivalent local launcher is:
-
-```bash
-./scripts/run-container.sh local
-```
-
-Local mode builds `tapo-enhance:local`; published mode pulls
-`aaronrohrbacher/tapo-enhance`. Both use the same Compose file, Docker named
-volumes, and host networking. Open `http://localhost:8000` on the Docker host
+The supplied Compose file uses named volumes and host networking. Open `http://localhost:8000` on the Docker host
 or `http://DOCKER-HOST:8000` from the LAN. Host networking is required so
 camera discovery sees and scans the Docker host's physical LAN directly.
 
@@ -166,38 +72,94 @@ To update the published image explicitly:
 ./scripts/run-container.sh published up -d
 ```
 
-### Docker Hub publishing
+### From the repository
 
-Pull requests targeting `main` run the complete Python and Chromium test suites,
-and branch protection requires both checks to pass before merge. Updates to
-`main` run CI again and independently trigger the Docker Hub publishing workflow.
-The publishing workflow builds and publishes
-`aaronrohrbacher/tapo-enhance` to Docker Hub with these tags:
+#### Requirements
 
-- `latest`
-- the semantic version recorded in [`VERSION`](VERSION), such as `0.1.2`
-- `sha-<full-git-commit>`, identifying the exact source commit
+- Linux on the same LAN as the camera
+- Python 3.11 or newer
+- `ffmpeg` and `ffprobe`
+- `nmap` and the `ip` command for automatic rediscovery
+- A Tapo camera account configured in the Tapo mobile app
+- An SD card in the camera for archive browsing
 
-The same job updates the Docker Hub repository overview from this `README.md`.
-Pull requests test without publishing. Both workflows also support manual
-dispatch; neither uses release or scheduled triggers.
+On Debian or Ubuntu:
 
-Before the first run, create a GitHub Actions repository secret named
-`DOCKERHUB_TOKEN`. It must be a Docker Hub personal access token for the
-`aaronrohrbacher` account with permission to push the image and update the
-repository description. The Docker Hub repository
-`aaronrohrbacher/tapo-enhance` must already exist.
+```bash
+sudo apt install ffmpeg nmap iproute2 python3-venv
+```
 
-Keep [`VERSION`](VERSION) in `major.minor.patch` form. To prepare a new semantic
-version locally, run `./scripts/deploy.py`, review its change, and include it in
-the commit or pull request that reaches `main`. Reusing the same value leaves
-the version tag pointing at the newest successful `main` build; the SHA tag
-always identifies the exact commit.
+#### Install and run
 
-The build embeds this version in the image; it appears in the UI header and
-at `GET /api/app`.
+```bash
+git clone https://github.com/AaronRohrbacher/tapo-enhance.git
+cd tapo-enhance
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements.txt
+```
 
-## Themes
+Optional non-secret server settings may be placed in `.env`:
+
+```dotenv
+APP_HOST=0.0.0.0
+APP_PORT=8000
+```
+
+Camera credentials are deliberately rejected from environment variables.
+
+Start the server:
+
+```bash
+.venv/bin/python app.py
+```
+
+Then open `http://SERVER-IP:8000` from a browser on your LAN. `Ctrl-C` closes
+active application connections and exits immediately.
+
+### Connect your camera
+
+If no camera credentials exist, the browser opens a first-run configuration
+form. The same form is available later under **Settings → configure another
+camera**. New details are verified against the camera before replacing the
+working configuration.
+
+First-run setup automatically derives the LAN subnet from the server's default
+route and scans it for Tapo camera candidates. A single result fills the camera
+address automatically; multiple results are shown for explicit selection. The
+subnet and address remain editable for segmented networks or unusual routing.
+
+## What it does
+
+### Live view and recordings
+
+Watch live video, browse SD-card events by date, and start playback while the
+recording is still arriving. Native camera thumbnails let you find an event
+without downloading the whole clip.
+
+Download a single event or select several for a batch download. Saved clips
+carry a **LOCAL** indicator and play directly from disk. Watching a recording
+does not save a permanent copy. The app remembers your camera and can rediscover
+it after a DHCP address change.
+
+### DVR Mode
+
+DVR Mode is available during first-run setup and later under **Settings**. It
+automatically downloads the camera's recording history, then checks on a
+user-selected interval. The default is 12:10am server time each day for the
+previous day's recordings. **Archive** shows sync status and provides **Sync
+now**; locally downloaded camera clips carry a persistent **LOCAL** indicator,
+including clips downloaded by DVR Mode. Local clips are validated and played
+from disk without opening another camera media session. A corrupt cached copy
+is retrieved again and atomically replaced. The default
+history length is the number of days from the
+oldest recording currently available through today. A longer history is valid:
+the app keeps checking and retains that many days as recordings become
+available. Retention deletes only local copies; it never deletes recordings on
+the camera. Initial setup shows the camera's available history; Archive shows
+both camera history and the number of local dates containing downloaded video.
+
+### Themes
 
 Themes are YAML files, so comments are supported. The built-ins are Phosphor
 (default), Amber Terminal, Midnight Blue, and Daylight. Selection is stored in
@@ -209,7 +171,7 @@ not required; reload the page and the server reads all YAML files again.
 Unknown CSS variable names are ignored, malformed files are reported without
 breaking valid themes, and files larger than 64 KiB are rejected.
 
-## Device features
+### Camera settings
 
 Settings includes a hardware-tested D225 dashboard for SD-card health and
 capacity, recording/loop state, video format, battery profile, firmware state,
@@ -218,7 +180,7 @@ for the status LED, motion/person/package detection, recording audio, doorbell
 ring handling, and day/night mode. Deliberately omitted high-risk operations
 include SD formatting, firmware flashing, sirens, and ambiguous power changes.
 
-## Storage behavior
+### Local storage
 
 All generated data lives below `cache/` and is ignored by Git:
 
@@ -249,33 +211,6 @@ session, then resumes if the user is still on the Live section. FFmpeg converts
 camera media to browser-compatible H.264/AAC and enforces the selected event's
 exact duration when camera firmware ignores its requested end time.
 
-## Security
-
-Tapo Enhance currently has no web login. Treat it as a trusted-LAN service:
-
-- Do not expose port 8000 directly to the public internet.
-- Never place camera credentials in `.env`, Compose variables, or source files.
-- If remote access is needed, put the app behind an authenticated reverse proxy
-  or reach the LAN through a VPN.
-- Run it as an unprivileged user with write access only to its data and key
-  storage.
-
-During setup the password exists briefly in server memory while the camera is
-verified. It is then stored only as AES-256-GCM authenticated ciphertext. In
-Docker, the `tapo-data` volume holds `/data/credentials.vault` (mode `0600`)
-and the separate `tapo-keys` volume holds `/keys/credentials.key` (mode
-`0600`). Native development uses the gitignored `cache/` and `.keys/`
-directories. None of these are included in Git or the image, and the
-configuration API never returns the password. Losing the installation key
-makes the vault intentionally unrecoverable; reconfigure the camera to create
-a new pair.
-
-Initial setup currently travels over HTTP on the trusted LAN. Encryption at
-rest does not encrypt that network request. Deploy behind HTTPS before allowing
-setup or access across an untrusted network.
-
-No Tapo cloud service is required by Tapo Enhance's application workflow.
-
 ## Development and tests
 
 ```bash
@@ -300,13 +235,6 @@ at a time; no full-video thumbnail generation; no archive write without an
 explicit download; bounded transient storage; and errors visible to the user.
 
 ## License
-
-Tapo Enhance builds on [Juraj Nyíri's `pytapo`](https://github.com/JurajNyiri/pytapo).
-Thank you to Juraj and the contributors for making direct Tapo communication
-possible. The separately maintained
-[`pytapo` fork](https://github.com/AaronRohrbacher/pytapo) adds native recording
-thumbnails and recording/live stream support, and is pinned to an exact commit
-in `requirements.txt`.
 
 Tapo Enhance is licensed under GPL-2.0-only; see [`LICENSE`](LICENSE). The
 companion `pytapo` fork retains the upstream MIT license and attribution. Its
