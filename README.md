@@ -25,9 +25,32 @@ in `requirements.txt`.
 
 ### Docker
 
-Requires Docker Engine and Docker Compose on Linux, on the camera's LAN.
-The image bundles the application and its system dependencies; the native
-Python installation is unnecessary when using Docker.
+Requires Docker Engine on Linux, on the camera's LAN. The published image
+includes the application and its dependencies.
+
+#### Docker run
+
+Pull the latest image from Docker Hub and start the container in one command:
+
+```bash
+docker run -d --pull=always --name tapo-enhance \
+  --network host \
+  --restart unless-stopped \
+  -e APP_PORT=8000 \
+  -e TAPO_CACHE_ROOT=/data \
+  -e TAPO_KEY_ROOT=/keys \
+  -v tapo-data:/data \
+  -v tapo-keys:/keys \
+  aaronrohrbacher/tapo-enhance:latest
+```
+
+Open `http://localhost:8000` on the Docker host or `http://DOCKER-HOST:8000`
+from another machine on the LAN.
+
+#### Docker Compose
+
+Alternatively, use Docker Compose with the same published image. Choose one
+of these installation methods; you do not need to run both.
 
 Create a directory for the application and save the following as `compose.yaml`.
 It pulls the published image directly from
@@ -89,22 +112,6 @@ docker compose up -d
 
 To pin a release, replace `latest` in the image name with a version such as
 `0.1.2`. Updates preserve the named volumes and saved configuration.
-
-#### Without Compose
-
-You can also run the same image directly:
-
-```bash
-docker run -d --name tapo-enhance \
-  --network host \
-  --restart unless-stopped \
-  -e APP_PORT=8000 \
-  -e TAPO_CACHE_ROOT=/data \
-  -e TAPO_KEY_ROOT=/keys \
-  -v tapo-data:/data \
-  -v tapo-keys:/keys \
-  aaronrohrbacher/tapo-enhance:latest
-```
 
 ### From the repository
 
