@@ -73,11 +73,6 @@ jobs:
           provenance: false
 
       - name: Update Docker Hub overview from README
-        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5
-        with:
-          username: aaronrohrbacher
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: ${{ env.DOCKERHUB_IMAGE }}
-          readme-filepath: ./README.md
-          short-description: Local-first web interface for viewing and downloading Tapo camera recordings.
-          enable-url-completion: true
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: python3 scripts/update-dockerhub-overview.py

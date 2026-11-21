@@ -57,5 +57,5 @@ def test_dockerhub_overview_uses_repository_readme():
         step for step in steps
         if step.get("name") == "Update Docker Hub overview from README"
     )
-    assert description["with"]["readme-filepath"] == "./README.md"
-    assert description["with"]["enable-url-completion"] == "true"
+    assert description["run"] == "python3 scripts/update-dockerhub-overview.py"
+    assert description["env"]["DOCKERHUB_TOKEN"] == "${{ secrets.DOCKERHUB_TOKEN }}"
