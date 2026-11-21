@@ -145,15 +145,13 @@ The equivalent local launcher is:
 
 Local mode builds `tapo-enhance:local`; published mode pulls
 `aaronrohrbacher/tapo-enhance`. Both use the same Compose file, Docker named
-volumes, and default networking. Port 8000 is published on the Docker host, so
-open `http://localhost:8000` on that host or `http://DOCKER-HOST:8000` from the
-LAN. Set `APP_BIND_ADDRESS=127.0.0.1` to restrict the published port to the
-Docker host.
+volumes, and host networking. Open `http://localhost:8000` on the Docker host
+or `http://DOCKER-HOST:8000` from the LAN. Host networking is required so
+camera discovery sees and scans the Docker host's physical LAN directly.
 
 The application image includes `nmap`, `iproute2`, `ffmpeg`, `ffprobe`, and
-`curl`. A bridge-networked container cannot reliably infer the Docker host's
-physical LAN subnet. Set `TAPO_SUBNET` in `.env`, or enter the LAN subnet in
-first-run setup, when automatic discovery proposes Docker's internal subnet:
+`curl`. Set `TAPO_SUBNET` in `.env`, or enter the LAN subnet in first-run setup,
+to override automatic detection:
 
 ```dotenv
 TAPO_SUBNET=192.168.1.0/24

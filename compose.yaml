@@ -7,8 +7,7 @@ services:
     image: ${TAPO_ENHANCE_IMAGE:-tapo-enhance}:${TAPO_ENHANCE_VERSION:-local}
     pull_policy: ${TAPO_PULL_POLICY:-build}
     hostname: tapo-enhance
-    ports:
-      - "${APP_BIND_ADDRESS:-0.0.0.0}:${APP_PORT:-8000}:8000"
+    network_mode: host
     environment:
       APP_PORT: 8000
       TAPO_CACHE_ROOT: /data
