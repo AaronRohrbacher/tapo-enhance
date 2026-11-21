@@ -29,6 +29,7 @@ def test_ci_runs_for_main_pull_requests_and_pushes():
     test_install = workflow["jobs"]["tests"]["steps"][-2]["run"]
     browser_install = workflow["jobs"]["browser"]["steps"][-2]["run"]
     assert "apt-get install -y ffmpeg" in test_install
+    assert "apt-get install -y ffmpeg" in browser_install
     assert "playwright install --with-deps chromium" in browser_install
 
 

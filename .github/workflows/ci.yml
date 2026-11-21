@@ -64,6 +64,8 @@ jobs:
       - name: Install dependencies and Chromium
         shell: bash
         run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
           python -m venv .venv
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/python -m pip install -r requirements-dev.txt
