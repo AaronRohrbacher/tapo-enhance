@@ -31,7 +31,7 @@ def test_ci_runs_only_for_main_pull_requests():
     assert "playwright install --with-deps chromium" in browser_install
 
 
-def test_dockerhub_publish_is_independent_and_has_traceable_tags():
+def test_dockerhub_publish_is_independent_and_has_release_tags():
     workflow = load_workflow(PUBLISH_WORKFLOW)
     assert workflow["on"] == {
         "push": {"branches": ["main"]},
@@ -44,7 +44,7 @@ def test_dockerhub_publish_is_independent_and_has_traceable_tags():
     assert "docker.io/${{ env.DOCKERHUB_IMAGE }}" in rendered
     assert "type=raw,value=latest" in rendered
     assert "type=raw,value=${{ steps.version.outputs.value }}" in rendered
-    assert "type=sha,format=long" in rendered
+    assert "type=sha" not in rendered
     assert "ghcr.io" not in rendered
 
 

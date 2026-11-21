@@ -26,27 +26,50 @@ in `requirements.txt`.
 ### Docker
 
 Requires Docker Engine and Docker Compose on Linux, on the camera's LAN.
-The image bundles the application and its system dependencies; the native
-Python installation is unnecessary when using Docker.
+The published image includes the application and its dependencies.
 
-Get the repository and start the published image:
+#### Docker Compose
+
+Download [compose.hub.yaml](https://raw.githubusercontent.com/AaronRohrbacher/tapo-enhance/main/compose.hub.yaml)
+and save it as `compose.yaml` in a directory of your choice. Then start the app:
 
 ```bash
-git clone https://github.com/AaronRohrbacher/tapo-enhance.git
-cd tapo-enhance
-./scripts/run-container.sh published
+curl -fsSL https://raw.githubusercontent.com/AaronRohrbacher/tapo-enhance/main/compose.hub.yaml -o compose.yaml
+docker compose up -d
 ```
 
-The supplied Compose file uses named volumes and host networking. Open `http://localhost:8000` on the Docker host
+Open `http://localhost:8000` on the Docker host or `http://DOCKER-HOST:8000`
+from another machine on the LAN.
+
+Compose pulls the published image directly from
+[Docker Hub](https://hub.docker.com/r/aaronrohrbacher/tapo-enhance); no source
+checkout or Python installation is needed. The downloaded file contains:
+
+```yaml
+services:
+  tapo-enhance:
+    image: aaronrohrbacher/tapo-enhance:latest
+    network_mode: host
+    volumes:
+      - tapo-data:/data
+      - tapo-keys:/keys
+    restart: unless-stopped
+
+volumes:
+  tapo-data:
+  tapo-keys:
+```
+
+Open `http://localhost:8000` on the Docker host
 or `http://DOCKER-HOST:8000` from the LAN. Host networking is required so
 camera discovery sees and scans the Docker host's physical LAN directly.
 
 The application image includes `nmap`, `iproute2`, `ffmpeg`, `ffprobe`, and
-`curl`. Set `TAPO_SUBNET` in `.env`, or enter the LAN subnet in first-run setup,
-to override automatic detection:
+`curl`. If automatic subnet detection needs an override, enter the LAN subnet
+in first-run setup or add `TAPO_SUBNET` to the Compose `environment` section:
 
-```dotenv
-TAPO_SUBNET=192.168.1.0/24
+```yaml
+      TAPO_SUBNET: 192.168.1.0/24
 ```
 
 Encrypted state survives container replacement in the Docker-managed
@@ -58,19 +81,15 @@ Custom networking is an advanced deployment choice. The supplied configuration
 uses host networking and does not install network plugins or change the host's
 forwarding or firewall settings.
 
-To inspect the container's address and routes:
+To update to the latest published image:
 
 ```bash
-./scripts/run-container.sh published exec tapo-enhance ip -4 address show
-./scripts/run-container.sh published exec tapo-enhance ip -4 route show
+docker compose pull
+docker compose up -d
 ```
 
-To update the published image explicitly:
-
-```bash
-./scripts/run-container.sh published pull
-./scripts/run-container.sh published up -d
-```
+To pin a release, replace `latest` in the image name with a version such as
+`0.1.2`. Updates preserve the named volumes and saved configuration.
 
 ### From the repository
 

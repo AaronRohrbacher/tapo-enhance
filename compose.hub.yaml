@@ -1,0 +1,12 @@
+services:
+  tapo-enhance:
+    image: aaronrohrbacher/tapo-enhance:latest
+    network_mode: host
+    volumes:
+      - tapo-data:/data
+      - tapo-keys:/keys
+    restart: unless-stopped
+
+volumes:
+  tapo-data:
+  tapo-keys:

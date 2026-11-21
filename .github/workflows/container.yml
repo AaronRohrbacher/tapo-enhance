@@ -52,7 +52,6 @@ jobs:
           tags: |
             type=raw,value=latest
             type=raw,value=${{ steps.version.outputs.value }}
-            type=sha,format=long
           labels: |
             org.opencontainers.image.title=Tapo Enhance
             org.opencontainers.image.description=Local-first web interface for viewing and downloading Tapo camera recordings
