@@ -397,7 +397,42 @@
   // ── live ─────────────────────────────────────────────────────────────
   let hls = null;
   let liveRequestGeneration = 0;
+  let liveLease = null;
+  let liveHeartbeatTimer = null;
+  let liveHeartbeatInFlight = false;
   const video = $("#live-video");
+
+  function clearLiveLease() {
+    if (liveHeartbeatTimer) clearInterval(liveHeartbeatTimer);
+    liveHeartbeatTimer = null;
+    liveHeartbeatInFlight = false;
+    const lease = liveLease;
+    liveLease = null;
+    return lease;
+  }
+
+  function beginLiveLease(lease) {
+    clearLiveLease();
+    if (!lease) return;
+    liveLease = lease;
+    liveHeartbeatTimer = setInterval(async () => {
+      if (!liveLease || liveHeartbeatInFlight) return;
+      const token = liveLease;
+      liveHeartbeatInFlight = true;
+      try {
+        await API.post("/api/stream/heartbeat", { lease: token });
+      } finally {
+        liveHeartbeatInFlight = false;
+      }
+    }, 5000);
+  }
+
+  window.addEventListener("pagehide", () => {
+    const lease = clearLiveLease();
+    if (!lease) return;
+    const body = new Blob([JSON.stringify({ lease })], { type: "application/json" });
+    navigator.sendBeacon("/api/stream/stop", body);
+  });
   $("#btn-mute").addEventListener("click", () => {
     video.muted = !video.muted;
     $("#btn-mute").textContent = video.muted ? "unmute" : "mute";
@@ -464,6 +499,7 @@
       return;
     }
     const url = r.data.url;
+    beginLiveLease(r.data.lease);
     const alreadyAttached = state.live.url === url && hls;
     set((s) => { s.live.status = "running"; s.live.url = url; s.live.error = null; });
     if (!alreadyAttached) setTimeout(() => {
@@ -473,13 +509,14 @@
 
   async function stopLive({ sound = true } = {}) {
     ++liveRequestGeneration;
+    const lease = clearLiveLease();
     if (hls) { hls.destroy(); hls = null; }
     video.pause();
     video.removeAttribute("src");
     video.load();
     if (sound) SFX.powerOff();
     set((s) => { s.live.status = "stopping"; s.live.url = null; });
-    const r = await API.post("/api/stream/stop", {});
+    const r = await API.post("/api/stream/stop", lease ? { lease } : {});
     if (!r.ok) {
       set((s) => { s.live.status = "error"; s.live.error = r.error; });
       toast("could not stop live: " + r.error, "error");

@@ -45,7 +45,7 @@ from .errors import ApiError, Code
 from .events import EventHub
 from .gateway import CameraGateway
 from .jobs import JobRegistry
-from .live import HlsConsumer, camera_live_source
+from .live import HlsConsumer, LiveLease, camera_live_source
 from .playback import make_runner as playback_runner
 from .playback import playlist_url
 from .recordings import Clip, Paths
@@ -195,6 +195,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         conversions=conversions,
     )
     hls_consumer = HlsConsumer(paths.stream, on_event=emit_event)
+    live_lease = LiveLease(timeout=20.0, on_expire=gateway.detach_live)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -207,6 +208,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
         try:
             yield
         finally:
+            await live_lease.close()
             await gateway.detach_live()
             await backfill.stop()
             await dvr.stop()
@@ -230,6 +232,7 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
     app.state.backfill = backfill
     app.state.jobs = jobs
     app.state.hls = hls_consumer
+    app.state.live_lease = live_lease
     app.state.hub = hub
     app.state.dvr = dvr
 
@@ -953,21 +956,41 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 
     @app.post("/api/stream/start")
     async def stream_start():
+        live_lease.revoke()
         previous_generation = hls_consumer.generation
         gateway.attach_live(hls_consumer)
         # A stale playlist from the prior run is not readiness. Wait until the
         # new generation has actually written a playable manifest.
         for _ in range(80):
             if hls_consumer.generation > previous_generation and hls_consumer.playable:
-                return {"ok": True, "url": hls_consumer.playback_url}
+                return {
+                    "ok": True,
+                    "url": hls_consumer.playback_url,
+                    "lease": live_lease.start(),
+                }
             await asyncio.sleep(0.25)
         await gateway.detach_live()
         error = hls_consumer.errors[-1] if hls_consumer.errors else "camera produced no playable segments"
         raise ApiError(Code.GATEWAY_TIMEOUT, f"live start timed out: {error}", status=504)
 
     @app.post("/api/stream/stop")
-    async def stream_stop():
+    async def stream_stop(req: Request):
+        body = await _optional_request_body(req)
+        token = body.get("lease")
+        if token is not None and not live_lease.active(token):
+            return {"ok": True, "stopped": False}
+        live_lease.revoke(token)
         await gateway.detach_live()
+        return {"ok": True}
+
+    @app.post("/api/stream/heartbeat")
+    async def stream_heartbeat(req: Request):
+        body = await _request_body(req)
+        token = body.get("lease")
+        if not isinstance(token, str) or not live_lease.touch(token):
+            raise ApiError(
+                Code.BAD_REQUEST, "live viewer lease is no longer active", status=409
+            )
         return {"ok": True}
 
     @app.get("/api/stream/status")
@@ -1118,6 +1141,19 @@ def build_app(*, settings: Settings | None = None, tapo_factory=None) -> FastAPI
 async def _request_body(req: Request) -> dict:
     try:
         body = await req.json()
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ApiError(Code.BAD_REQUEST, "request body must be valid JSON", status=400) from exc
+    if not isinstance(body, dict):
+        raise ApiError(Code.BAD_REQUEST, "request body must be a JSON object", status=400)
+    return body
+
+
+async def _optional_request_body(req: Request) -> dict:
+    raw = await req.body()
+    if not raw:
+        return {}
+    try:
+        body = json.loads(raw)
     except (ValueError, UnicodeDecodeError) as exc:
         raise ApiError(Code.BAD_REQUEST, "request body must be valid JSON", status=400) from exc
     if not isinstance(body, dict):
