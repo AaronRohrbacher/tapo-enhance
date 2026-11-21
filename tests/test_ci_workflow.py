@@ -12,12 +12,10 @@ def load_workflow(path):
     return yaml.load(path.read_text(), Loader=yaml.BaseLoader)
 
 
-def test_ci_runs_for_main_pull_requests_and_pushes():
+def test_ci_runs_only_for_main_pull_requests():
     workflow = load_workflow(CI_WORKFLOW)
     assert workflow["on"] == {
         "pull_request": {"branches": ["main"]},
-        "push": {"branches": ["main"]},
-        "workflow_dispatch": "",
     }
     assert set(workflow["jobs"]) == {"tests", "browser"}
     assert workflow["jobs"]["tests"]["steps"][-1]["run"] == (
